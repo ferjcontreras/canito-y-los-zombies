@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Tooling / local artifacts
+.playwright-mcp/
+.claude/
+mendoza-city-dist.zip
+start.jpeg
+*.log
+
+# OS
+.DS_Store
