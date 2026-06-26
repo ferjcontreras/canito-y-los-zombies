@@ -16,6 +16,7 @@ import { Tram } from './entities/Tram';
 import { CityBus } from './entities/CityBus';
 import { EffectsManager } from './world/Effects';
 import { SoundManager } from './world/Sound';
+import { ZombieMusic } from './world/ZombieMusic';
 import { buildMendozaLayout } from './geo/MendozaLayout';
 import { Projection } from './geo/Projection';
 import { buildBuildings } from './world/BuildingBuilder';
@@ -33,6 +34,10 @@ import { buildPublicBuildings } from './world/PublicBuildings';
 import { createTreeGeos, scatterTreesInPolygon, addAvenueTree, scatterStreetTrees, commitTrees } from './world/TreeBuilder';
 import { buildStreetLampsAlongRoads, buildStreetLamps, buildBenches, buildBenchesAt } from './world/UrbanFurnitureBuilder';
 import { LoadingOverlay } from './ui/LoadingOverlay';
+import { upgradeToPBR } from './world/pbr';
+import { CityGraph } from './city/CityGraph';
+import { TrafficManager } from './city/Traffic';
+import { CivilianManager } from './city/Civilians';
 const CENTER = { lat: -32.8895, lon: -68.8458 };
 // Portones at the NW corner of the layout (just east of Parque San Martín)
 const PORTONES_X = -900; // Av. Boulogne Sur Mer (borde del parque)
@@ -375,8 +380,9 @@ async function main() {
     // ── Effects + sound ──────────────────────────────────────────────────────
     const effects = new EffectsManager(engine.scene);
     const sound = new SoundManager();
+    const music = new ZombieMusic();
     // Unlock WebAudio on first user interaction (browsers require a gesture)
-    const unlockSound = () => { sound.unlock(); window.removeEventListener('keydown', unlockSound); window.removeEventListener('pointerdown', unlockSound); };
+    const unlockSound = () => { sound.unlock(); music.unlock(); window.removeEventListener('keydown', unlockSound); window.removeEventListener('pointerdown', unlockSound); };
     window.addEventListener('keydown', unlockSound);
     window.addEventListener('pointerdown', unlockSound);
     // ── Character & camera ────────────────────────────────────────────────────
@@ -570,7 +576,9 @@ async function main() {
     const hudHPFill = document.getElementById('hud-hp-fill');
     const hudPowerFill = document.getElementById('hud-power-fill');
     const hudKills = document.getElementById('hud-kills');
+    const hudSaved = document.getElementById('hud-saved');
     const hudLives = document.getElementById('hud-lives');
+    let savedCount = 0;
     const gameOverEl = document.getElementById('game-over');
     const victoryEl = document.getElementById('victory');
     const victoryStats = document.getElementById('victory-stats');
@@ -578,6 +586,49 @@ async function main() {
     const runners = zombies.filter(z => z.isRunner).length;
     loading.setMessage(`Listo — ${zombies.length} gauchos (${runners} corredores · ${throwers} thrower) + ${gauchoCars.length} autos · ${bones.length} huesitos en plazas`);
     await new Promise(r => setTimeout(r, 500));
+    // ── Gente en las calles + autos (la ciudad en plena invasión) ───────────────
+    const graph = new CityGraph(streets, nodeMap, proj);
+    // Autos ambientales que circulan por las calles y frenan ante Canito/civiles.
+    const traffic = new TrafficManager(engine.scene, graph, 90, 30);
+    // Civiles que huyen de los zombies; al morderlos caen, convulsionan y se
+    // transforman en zombies nuevos. Se spawnean en MULTITUDES a lo largo del
+    // recorrido (este→Portones) y cerca del inicio, para que se vean enseguida.
+    const CIV_CLUSTERS = [
+        [650, 25], [640, -35], [560, 15], [470, -20], [340, 25],
+        [220, -30], [110, 20], [-30, -25], [-160, 25], [-300, -20],
+        [-460, 20], [-640, -15], [-150, 120], [120, -180], [-250, 240],
+        // repartidos por todo el microcentro (invasión reciente: gente por doquier)
+        [250, -250], [250, 250], [-250, -250], [0, 0], [400, 200],
+        [-400, 200], [400, -300], [-500, 300], [200, 350], [-200, -350],
+        [500, 100], [-700, 200], [350, -150], [-100, 300], [60, -300],
+    ];
+    const civilianSpawn = () => {
+        for (let t = 0; t < 30; t++) {
+            const [cx, cz] = CIV_CLUSTERS[(Math.random() * CIV_CLUSTERS.length) | 0];
+            const x = cx + (Math.random() - 0.5) * 46;
+            const z = cz + (Math.random() - 0.5) * 46;
+            if (!insideAnyCollider(x, z, 0.6))
+                return [x, z];
+        }
+        return [650 + (Math.random() - 0.5) * 20, 25 + (Math.random() - 0.5) * 20];
+    };
+    const civilians = new CivilianManager(engine.scene, 420, civilianSpawn);
+    // Autos sólidos: Canito y los zombies no los atraviesan.
+    colliders.push(...traffic.colliders());
+    // Colliders del mundo + autos (SIN los civiles) — los civiles se mueven con
+    // estos para no trabarse entre ellos.
+    const worldColliders = colliders.slice();
+    // Civiles sólidos para Canito y los zombies (los pueden chocar / matar).
+    colliders.push(...civilians.colliders());
+    // Buffers reusados por frame para el tránsito
+    const trafficObstacles = [];
+    const civBuf = [];
+    // Pase PBR: convierte los materiales del mundo a MeshStandard para que
+    // respondan al tone mapping ACES, la oclusión ambiental y el environment map.
+    upgradeToPBR(engine.scene);
+    // Tecla C: ciclo de calidad de render (Rendimiento → Equilibrada → Alta).
+    window.addEventListener('keydown', (e) => { if (e.code === 'KeyC')
+        engine.cycleQuality(); });
     loading.hide();
     // ── Game state ────────────────────────────────────────────────────────────
     const fireballs = [];
@@ -678,13 +729,31 @@ async function main() {
             }
         });
     }
+    // ── Tecla M: música on/off ─────────────────────────────────────────────────
+    window.addEventListener('keydown', (e) => {
+        if (e.code !== 'KeyM')
+            return;
+        const on = music.toggle();
+        flashBanner(on ? '♪ Música ON' : '♪ Música OFF', on ? '#7eff8a' : '#ff8a40');
+    });
     const tmpDir = new THREE.Vector3();
+    // ── Monedas por RESCATE: matar al zombie que perseguía a un civil ───────────
+    let coins = 0;
+    const coinsHud = document.createElement('div');
+    coinsHud.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:120;' +
+        'font:800 16px system-ui,sans-serif;color:#ffd24a;background:rgba(13,17,23,0.82);' +
+        'border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:6px 14px;pointer-events:none;';
+    document.body.appendChild(coinsHud);
+    const renderCoins = () => { coinsHud.textContent = `💰 ${coins}`; };
+    renderCoins();
+    const SAVE_RADIUS = 9;
+    const SAVE_REWARD = 15;
     // Helpers — kill a zombie with blood + groan
     // Instakill for normal enemies; bosses (caballitos) only take chip damage from
     // area sources so they can't be finished off by a stray blast/Aullido/tram —
     // you must deliberately wear both down with fireballs.
     const AREA_BOSS_DMG = 6;
-    const killZombie = (z) => {
+    const killZombie = (z, byPlayer = true) => {
         if (!z.alive)
             return;
         if (z.isCaballito || z.isBoss) {
@@ -699,6 +768,15 @@ async function main() {
         }
         killCount++;
         hudKills.textContent = killCount.toString();
+        // ¿Salvaste a alguien? Si había un civil cerca del zombie que cayó, +monedas.
+        if (byPlayer) {
+            const nc = civilians.nearest(z.position.x, z.position.z);
+            if (nc && nc.d < SAVE_RADIUS) {
+                coins += SAVE_REWARD;
+                renderCoins();
+                flashBanner(`+${SAVE_REWARD} 💰 ¡Rescate!`, '#ffd24a');
+            }
+        }
         z.remove(engine.scene);
     };
     // Blast — explode a car at idx and damage everything within radius
@@ -872,6 +950,29 @@ async function main() {
         setTimeout(() => { warn.remove(); }, 2200);
     };
     const canitoPos = canito.getPosition(); // captured by closure; same Vector3 ref
+    let carInfectCD = 0.5; // cuenta regresiva para infectar autos
+    const _zTarget = new THREE.Vector3(); // target reusable (humano más cercano)
+    const zHazards = []; // posiciones de zombies (pánico del tránsito)
+    const INNOCENT_PENALTY = 2; // vida que pierde Canito al matar un inocente
+    // Atropello de los vehículos en pánico: mata civiles/zombies y lastima a Canito.
+    const trafficRunOver = (x, z) => {
+        let hit = false;
+        if (civilians.killArea(x, z, 2.0) > 0) {
+            hit = true;
+            effects.spawnBlood(new THREE.Vector3(x, 0.5, z));
+        }
+        for (const z2 of zombies) {
+            if (z2.alive && Math.hypot(z2.position.x - x, z2.position.z - z) < 2.0) {
+                killZombie(z2, false);
+                hit = true;
+            }
+        }
+        if (!gameOver && Math.hypot(canitoPos.x - x, canitoPos.z - z) < 1.7) {
+            setHP(canitoHP - 3, x, z);
+            hit = true;
+        }
+        return hit;
+    };
     engine.start(dt => {
         // Game over: esperar un tap de Espacio para empezar de nuevo (no auto-reinicio)
         if (gameOver) {
@@ -900,6 +1001,76 @@ async function main() {
         effects.update(dt);
         env.update(dt, canitoPos.x, canitoPos.z);
         plaza.update(dt);
+        // ── Ciudad viva: autos ambientales (en pánico) + civiles que huyen ───────
+        civBuf.length = 0;
+        civilians.positions(civBuf);
+        trafficObstacles.length = 0;
+        trafficObstacles.push({ x: canitoPos.x, z: canitoPos.z, r: 0.9, honk: false });
+        for (const q of civBuf)
+            trafficObstacles.push({ x: q.x, z: q.z, r: 0.5, honk: false });
+        // Zombies = peligro: el tránsito que los tenga cerca entra en pánico.
+        zHazards.length = 0;
+        let nearZ = 0;
+        for (const z of zombies) {
+            if (!z.alive)
+                continue;
+            zHazards.push({ x: z.position.x, z: z.position.z });
+            const dx = z.position.x - canitoPos.x, dz = z.position.z - canitoPos.z;
+            if (dx * dx + dz * dz < 2025)
+                nearZ++; // dentro de 45 m
+        }
+        traffic.update(dt, trafficObstacles, zHazards, trafficRunOver);
+        // Intensidad de la música: sube con zombies cerca; al máximo con jefes cerca.
+        if (gameOver || victory) {
+            music.setIntensity(0);
+        }
+        else {
+            let inten = Math.min(0.8, nearZ / 6);
+            for (const c of caballitos) {
+                if (!c.alive)
+                    continue;
+                const dx = c.position.x - canitoPos.x, dz = c.position.z - canitoPos.z;
+                if (dx * dx + dz * dz < 25600) {
+                    inten = 1;
+                    break;
+                } // jefe a <160 m
+            }
+            music.setIntensity(inten);
+        }
+        // Civiles: huyen de los zombies; al ser mordidos convulsionan y se
+        // transforman en zombies nuevos.
+        if (!gameOver && !victory) {
+            const born = civilians.update(dt, zombies, worldColliders, engine.scene, canitoPos.x, canitoPos.z, (sx, sz) => {
+                // ¡Persona rescatada! Recompensa: cura + contador + festejo.
+                savedCount++;
+                hudSaved.textContent = savedCount.toString();
+                if (canitoHP < MAX_HP)
+                    setHP(Math.min(MAX_HP, canitoHP + 2));
+                effects.spawnShockwave(new THREE.Vector3(sx, 0.3, sz), 2.2);
+                sound.bark();
+            });
+            for (const [bx, bz] of born)
+                addZombie(bx, bz, Math.random() < 0.3);
+            // Zombies que alcanzan un auto lo "infectan" → auto zombi (GauchoCar).
+            carInfectCD -= dt;
+            if (carInfectCD <= 0 && gauchoCars.length < 28) {
+                carInfectCD = 0.35;
+                for (let k = 0; k < 2 && zombies.length; k++) {
+                    const z = zombies[(Math.random() * zombies.length) | 0];
+                    if (!z.alive)
+                        continue;
+                    const got = traffic.infectNear(z.position.x, z.position.z, 3.2);
+                    if (got) {
+                        const car = new GauchoCar();
+                        car.position.set(got.x, 0, got.z);
+                        car.group.rotation.y = got.angle;
+                        engine.scene.add(car.group);
+                        gauchoCars.push(car);
+                        effects.spawnExplosion(new THREE.Vector3(got.x, 0.5, got.z));
+                    }
+                }
+            }
+        }
         // ── Bus Turístico: circula despacio y EMPUJA lo que tenga delante ────────
         cityBus.update(dt);
         {
@@ -975,11 +1146,53 @@ async function main() {
             sound.bark();
         }
         // ── Zombies ────────────────────────────────────────────────────────────
+        const ZCULL2 = 185 * 185; // los zombies lejos del jugador se congelan/ocultan
         for (const z of zombies) {
             if (!z.alive)
                 continue;
-            const r = z.update(dt, canitoPos, colliders);
-            if (r.hitTarget && !gameOver) {
+            // Culling por distancia: lejos → invisible y sin IA/colisión (rinde con
+            // muchos zombies + civiles).
+            const zdx = z.position.x - canitoPos.x, zdz = z.position.z - canitoPos.z;
+            if (zdx * zdx + zdz * zdz > ZCULL2) {
+                if (z.group.visible)
+                    z.group.visible = false;
+                continue;
+            }
+            if (!z.group.visible)
+                z.group.visible = true;
+            // Si está sosteniendo a un civil (cuenta regresiva), queda quieto: no
+            // persigue ni ataca a Canito hasta convertir/soltar a la víctima.
+            if (z.grabbing)
+                continue;
+            // Target: el humano más cercano. Los zombies normales también cazan a los
+            // civiles; los jefes/throwers/reinas siguen yendo por Canito.
+            let tgt = canitoPos;
+            let tgtIsCanito = true;
+            if (!z.isThrower && !z.isQueen && !z.isCaballito && !z.isBoss) {
+                let bd = Math.hypot(canitoPos.x - z.position.x, canitoPos.z - z.position.z);
+                let bx = canitoPos.x, bz = canitoPos.z, isCan = true;
+                const nc = civilians.nearest(z.position.x, z.position.z);
+                if (nc && nc.d < bd) {
+                    bd = nc.d;
+                    bx = nc.x;
+                    bz = nc.z;
+                    isCan = false;
+                }
+                const nv = traffic.nearest(z.position.x, z.position.z); // también cazan autos/motos
+                if (nv && nv.d < bd) {
+                    bd = nv.d;
+                    bx = nv.x;
+                    bz = nv.z;
+                    isCan = false;
+                }
+                if (!isCan) {
+                    _zTarget.set(bx, 0, bz);
+                    tgt = _zTarget;
+                    tgtIsCanito = false;
+                }
+            }
+            const r = z.update(dt, tgt, worldColliders);
+            if (r.hitTarget && tgtIsCanito && !gameOver) {
                 setHP(canitoHP - (z.isCaballito ? 3 : 1), z.position.x, z.position.z);
                 sound.bite();
             }
@@ -1146,11 +1359,24 @@ async function main() {
             }
             if (!gc.alive)
                 continue;
-            const r = gc.update(dt, canitoPos, colliders);
+            const r = gc.update(dt, canitoPos, worldColliders);
             if (r.hitTarget && !gameOver) {
                 setHP(canitoHP - GauchoCar.HIT_DAMAGE, gc.position.x, gc.position.z);
                 sound.boom();
                 effects.spawnExplosion(gc.position.clone());
+            }
+            // Atropella humanos (los mata) y embiste autos/motos (los convierte).
+            if (civilians.killArea(gc.position.x, gc.position.z, 2.4) > 0) {
+                effects.spawnBlood(gc.position.clone());
+            }
+            const hitCar = traffic.infectNear(gc.position.x, gc.position.z, 3.0);
+            if (hitCar && gauchoCars.length < 28) {
+                const nc = new GauchoCar();
+                nc.position.set(hitCar.x, 0, hitCar.z);
+                nc.group.rotation.y = hitCar.angle;
+                engine.scene.add(nc.group);
+                gauchoCars.push(nc);
+                effects.spawnExplosion(new THREE.Vector3(hitCar.x, 0.5, hitCar.z));
             }
         }
         // ── Carro de la Vendimia: persigue, embiste y lanza proyectiles ──────────
@@ -1266,6 +1492,18 @@ async function main() {
                             break;
                         }
                     }
+                }
+                // (Las bolas de fuego ya NO matan civiles: a la gente se la salva
+                // matando al zombie que la tiene agarrada, no quemándola.)
+                // Autos/motos circulando (no zombis): Canito los puede destruir, pero
+                // también le quita vida (era gente).
+                if (!hit && traffic.killNear(fb.position.x, fb.position.z, 2.4)) {
+                    fb.kill();
+                    effects.spawnExplosion(fb.position.clone());
+                    sound.boom();
+                    if (!gameOver)
+                        setHP(canitoHP - INNOCENT_PENALTY);
+                    hit = true;
                 }
                 // Fizzle against a building/wall only if it didn't hit a car or zombie
                 if (!hit && fb.hitSolid)

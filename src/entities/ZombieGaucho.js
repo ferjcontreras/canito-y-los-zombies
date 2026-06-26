@@ -52,6 +52,7 @@ export class ZombieGaucho {
     isBoss;
     isQueen;
     isCaballito;
+    grabbing = false; // está sosteniendo a un civil (queda quieto)
     _hp;
     _fastGait = false; // runner-style leg/bob animation
     _phase = Math.random() * Math.PI * 2;

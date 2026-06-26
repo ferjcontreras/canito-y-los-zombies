@@ -8,6 +8,7 @@ export class SoundManager {
     _ctx = null;
     _last = new Map();
     _master = null;
+    _barkBuf = null; // ladrido real (audio/bark.mp3)
     getCtx() {
         if (this._ctx)
             return this._ctx;
@@ -17,7 +18,17 @@ export class SoundManager {
         this._master = this._ctx.createGain();
         this._master.gain.value = 0.45;
         this._master.connect(this._ctx.destination);
+        void this._loadBark();
         return this._ctx;
+    }
+    async _loadBark() {
+        try {
+            const res = await fetch('audio/bark.mp3');
+            if (!res.ok)
+                return;
+            this._barkBuf = await this._ctx.decodeAudioData(await res.arrayBuffer());
+        }
+        catch { /* se queda con el ladrido sintético */ }
     }
     // Audio needs a user gesture to start in most browsers. Call this from a
     // mousedown/keydown listener at boot.
@@ -40,6 +51,18 @@ export class SoundManager {
             return;
         const ctx = this.getCtx();
         const now = ctx.currentTime;
+        // Ladrido REAL (sample) si ya cargó; con leve variación de tono.
+        if (this._barkBuf) {
+            const src = ctx.createBufferSource();
+            src.buffer = this._barkBuf;
+            src.playbackRate.value = 0.96 + Math.random() * 0.08;
+            const g = ctx.createGain();
+            g.gain.value = 1.1;
+            src.connect(g).connect(this.master());
+            src.start(now);
+            return;
+        }
+        // Fallback sintético (mientras carga / si falla)
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sawtooth';
