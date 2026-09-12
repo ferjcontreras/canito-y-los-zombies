@@ -9,6 +9,8 @@ dist/
 .claude/
 mendoza-city-dist.zip
 start.jpeg
+*.png
+!public/**/*.png
 *.log
 
 # OS

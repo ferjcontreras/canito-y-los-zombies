@@ -12,6 +12,7 @@ import { GrapeBunch }        from './entities/GrapeBunch';
 import { Spit }              from './entities/Spit';
 import { VendimiaCart }      from './entities/VendimiaCart';
 import { VendimiaThrow }     from './entities/VendimiaThrow';
+import { GauchoSnack }       from './entities/GauchoSnack';
 import { Bone }              from './entities/Bone';
 import { Tram }              from './entities/Tram';
 import { CityBus }           from './entities/CityBus';
@@ -40,12 +41,17 @@ import { upgradeToPBR }      from './world/pbr';
 import { CityGraph }         from './city/CityGraph';
 import { TrafficManager, type Obstacle } from './city/Traffic';
 import { CivilianManager }   from './city/Civilians';
+import { CharacterModel }    from './world/CharacterModel';
 
 const CENTER    = { lat: -32.8895, lon: -68.8458 };
 
 // Portones at the NW corner of the layout (just east of Parque San Martín)
 const PORTONES_X = -900;   // Av. Boulogne Sur Mer (borde del parque)
 const PORTONES_Z = 0;      // al final de calle Sarmiento
+
+// Calle Chile (x=-100): borde oeste de la Plaza Independencia y frontera entre
+// el Nivel 1 (este) y el Nivel 2 (oeste). Barrera hasta vencer al Carro.
+const CHILE_X = -100;
 
 // Sandy pedestrian promenade (no asphalt) connecting Plaza Independencia to
 // the Portones. Drawn as a narrow tile-coloured strip that doesn't compete
@@ -472,41 +478,26 @@ async function main(): Promise<void> {
   addZombie(START_X - 45, START_Z - 6);
   addZombie(START_X - 55, START_Z + 8);
 
-  // Cluster of zombies along the path from start to Portones (the avenue route).
+  // Horda concentrada a lo largo de la avenida que recorre Canito (largada →
+  // Portones), NO dispersa por toda la ciudad. Una banda alrededor de la ruta
+  // (z≈0), saltando la Plaza Independencia. Así cada nivel se lee claro y las
+  // cuadras alejadas quedan tranquilas. El Nivel 1 (este de Chile) arranca con
+  // más densidad para que haya acción enseguida.
   {
-    const dx = PORTONES_X - START_X;
-    const dz = PORTONES_Z - START_Z;
-    const L  = Math.hypot(dx, dz);
-    const udx = dx / L, udz = dz / L;
-    const px = -udz, pz = udx;       // perpendicular
-    const PATH_ZOMBIES = 40;
-    for (let i = 1; i < PATH_ZOMBIES; i++) {
-      const t = (i / PATH_ZOMBIES) * L;
-      const baseX = START_X + udx * t;
-      const baseZ = START_Z + udz * t;
-      // Random perpendicular offset so they're not in a single line
-      const offset = (Math.random() - 0.5) * 35;
-      addZombie(baseX + px * offset + (Math.random() - 0.5) * 6,
-                baseZ + pz * offset + (Math.random() - 0.5) * 6);
-    }
-  }
-
-  // Many scattered zombies across the whole city
-  const ZOMBIE_COUNT = 120;
-  {
-    let spawned = 0;
-    let tries   = 0;
-    while (spawned < ZOMBIE_COUNT && tries++ < 2000) {
-      const zx = -850 + Math.random() * 1550;   // x ∈ [-850, 700]
-      const zz = -550 + Math.random() * 1050;   // z ∈ [-550, 500]
-      if (Math.hypot(zx - START_X, zz - START_Z) < 60) continue;
-      if (Math.hypot(zx -    0, zz -    0) < 150) continue;   // Plaza Independencia
-      if (Math.hypot(zx -  250, zz - -250) <  55) continue;   // plazas satélite
-      if (Math.hypot(zx - -250, zz - -250) <  55) continue;
-      if (Math.hypot(zx - -250, zz -  250) <  55) continue;
-      if (Math.hypot(zx -  250, zz -  250) <  55) continue;
-      if (addZombie(zx, zz)) spawned++;
-    }
+    const HORDE_L1 = 85;   // tramo este (Nivel 1): START_X → calle Chile (x=-100)
+    const HORDE_L2 = 40;   // tramo oeste (Nivel 2): Chile → Portones
+    const band = (n: number, xMin: number, xMax: number, halfZ: number) => {
+      let spawned = 0, tries = 0;
+      while (spawned < n && tries++ < n * 25) {
+        const zx = xMin + Math.random() * (xMax - xMin);
+        const zz = START_Z + (Math.random() - 0.5) * halfZ * 2;
+        if (Math.hypot(zx - START_X, zz - START_Z) < 55) continue;
+        if (Math.hypot(zx, zz) < 150) continue;             // Plaza Independencia
+        if (addZombie(zx, zz)) spawned++;
+      }
+    };
+    band(HORDE_L1, CHILE_X + 10, START_X - 30, 55);
+    band(HORDE_L2, PORTONES_X + 40, CHILE_X - 10, 55);
   }
 
   // ── Throwers: heavy gauchos guarding the Portones ─────────────────────────
@@ -524,22 +515,11 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── Reinas de la Vendimia zombi: rondan la Plaza Independencia ────────────
-  // Corredoras y resistentes (3 bolas de fuego). Spawnean en un anillo
-  // alrededor del origen (centro de Plaza Independencia).
-  {
-    const QUEEN_COUNT = 6;
-    let spawned = 0;
-    let tries   = 0;
-    while (spawned < QUEEN_COUNT && tries++ < 300) {
-      const a  = Math.random() * Math.PI * 2;
-      const r  = 55 + Math.random() * 75;        // anillo 55–130 m de la plaza
-      const qx = Math.cos(a) * r;
-      const qz = Math.sin(a) * r;
-      if (Math.hypot(qx - START_X, qz - START_Z) < 60) continue;
-      if (addZombie(qx, qz, false, false, true)) spawned++;
-    }
-  }
+  // ── Reinas de la Vendimia zombi ───────────────────────────────────────────
+  // Ya NO aparecen al arranque: forman parte del jefe del Nivel 1. Brotan
+  // alrededor de Canito recién cuando éste llega a la calle Chile (borde oeste
+  // de la Plaza Independencia), junto con el Carro de la Vendimia. Ver
+  // checkLevel1Boss() más abajo.
 
   // El boss (centinela de los Portones) ya no está desde el arranque: irrumpe
   // durante la emboscada, en checkAmbush().
@@ -614,6 +594,23 @@ async function main(): Promise<void> {
 
   // ── Gente en las calles + autos (la ciudad en plena invasión) ───────────────
   const graph = new CityGraph(streets, nodeMap, proj);
+
+  // ¿Está el punto sobre alguna calzada? (distancia al eje de una calle menor a
+  // su semiancho + un margen). Lo usa el Carro de la Vendimia para circular sólo
+  // por las calles, como un vehículo real.
+  const onRoad = (x: number, z: number, margin = 2): boolean => {
+    for (const e of graph.edges) {
+      const ex = e.bx - e.ax, ez = e.bz - e.az;
+      const l2 = ex * ex + ez * ez;
+      if (l2 < 1e-3) continue;
+      let t = ((x - e.ax) * ex + (z - e.az) * ez) / l2;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+      const dx = x - (e.ax + ex * t), dz = z - (e.az + ez * t);
+      if (dx * dx + dz * dz < (e.halfW + margin) * (e.halfW + margin)) return true;
+    }
+    return false;
+  };
+
   // Autos ambientales que circulan por las calles y frenan ante Canito/civiles.
   const traffic = new TrafficManager(engine.scene, graph, 90, 30);
 
@@ -638,7 +635,14 @@ async function main(): Promise<void> {
     }
     return [650 + (Math.random() - 0.5) * 20, 25 + (Math.random() - 0.5) * 20];
   };
-  const civilians = new CivilianManager(engine.scene, 420, civilianSpawn);
+  // Civiles: modelos low-poly CC0 (Quaternius) — casual + traje, para variedad.
+  // Con esqueleto pesan más que las cajas, así que bajamos la cantidad y se
+  // animan/dibujan sólo los cercanos (culling).
+  loading.setMessage('Cargando personajes…');
+  const civModels = [new CharacterModel(), new CharacterModel()];
+  await civModels[0].load('models/civ-casual.glb', 2.3);   // un toque más altos que los autos
+  await civModels[1].load('models/civ-suit.glb', 2.3);
+  const civilians = new CivilianManager(engine.scene, 130, civilianSpawn, civModels);
 
   // Autos sólidos: Canito y los zombies no los atraviesan.
   colliders.push(...traffic.colliders());
@@ -668,6 +672,7 @@ async function main(): Promise<void> {
   const spits: Spit[] = [];
   const vendimiaCarts: VendimiaCart[] = [];
   const vendimiaThrows: VendimiaThrow[] = [];
+  const gauchoSnacks: GauchoSnack[] = [];   // empanadas y mates de los bailarines
   let canitoHP   = 20;
   let killCount  = 0;
   let barkCD     = 0;
@@ -685,6 +690,23 @@ async function main(): Promise<void> {
 
   const renderLives = () => { hudLives.textContent = '🐾'.repeat(lives) || '—'; };
   renderLives();
+
+  // ── Niveles ────────────────────────────────────────────────────────────────
+  // El escenario está dividido en dos niveles:
+  //   Nivel 1 — de la largada (este) hasta la Plaza Independencia. Jefe: el
+  //             Carro de la Vendimia (con su escolta de Reinas). Canito NO puede
+  //             cruzar la calle Chile (x = -100, borde oeste de la plaza) hasta
+  //             vencer al Carro.
+  //   Nivel 2 — de la Plaza Independencia hasta los Portones del Parque. Jefes:
+  //             los Caballitos de Marly (emboscada final).
+  // (CHILE_X = -100 se define arriba, junto a las constantes del mundo.)
+  let level            = 1;
+  let level1BossActive = false;    // ¿se disparó la pelea del Carro de la Vendimia?
+  let level1Cleared    = false;    // ¿cayó el Carro? → se abre el paso al oeste
+  let chileHintAt      = 0;        // anti-spam del cartel de la barrera
+  const hudLevel = document.getElementById('hud-level')!;
+  const renderLevel = () => { hudLevel.textContent = level.toString(); };
+  renderLevel();
 
   const MAX_HP = 20;
   const renderHP = () => {
@@ -706,6 +728,31 @@ async function main(): Promise<void> {
     requestAnimationFrame(() => { el.style.opacity = '1'; });
     setTimeout(() => { el.style.opacity = '0'; }, 1500);
     setTimeout(() => { el.remove(); }, 2100);
+  };
+
+  // Carátula de inicio de nivel (estilo intro de mundo de Mario Bros): fondo
+  // oscuro a pantalla completa con "NIVEL N", un subtítulo y las vidas de Canito.
+  // Aparece ~2.8 s y se desvanece. `onDone` corre al desaparecer.
+  const showLevelCard = (lvl: number, subtitle: string, onDone?: () => void) => {
+    const card = document.createElement('div');
+    card.style.cssText = `
+      position: fixed; inset: 0; z-index: 300; background: #0a0c11;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 20px; opacity: 0; transition: opacity 0.4s;
+      font-family: system-ui, sans-serif; text-align: center;`;
+    card.innerHTML = `
+      <div style="font-size:1.1rem;letter-spacing:0.4em;color:#8b93a7;">MENDOZA CITY</div>
+      <div style="font-size:4.6rem;font-weight:900;color:#ffd24a;
+                  text-shadow:0 0 26px rgba(255,210,74,0.5);letter-spacing:0.04em;">NIVEL ${lvl}</div>
+      <div style="font-size:1.5rem;color:#c9d1d9;">${subtitle}</div>
+      <div style="font-size:2.2rem;font-weight:800;color:#7eff8a;
+                  display:flex;align-items:center;gap:14px;margin-top:6px;">
+        <span style="font-size:2.6rem;">🐕</span> ✕ ${lives}
+      </div>`;
+    document.body.appendChild(card);
+    requestAnimationFrame(() => { card.style.opacity = '1'; });
+    setTimeout(() => { card.style.opacity = '0'; }, 2800);
+    setTimeout(() => { card.remove(); onDone?.(); }, 3300);
   };
 
   const respawn = () => {
@@ -746,6 +793,10 @@ async function main(): Promise<void> {
     }
   };
   setHP(canitoHP);
+
+  // Carátula de arranque: "NIVEL 1" con las vidas de Canito.
+  invuln = Math.max(invuln, 3.4);
+  showLevelCard(1, 'Del microcentro a la Plaza Independencia');
 
   // ── Truco: escribí "vida" para activar/desactivar VIDA INFINITA (explorar) ──
   let godMode = false;
@@ -843,6 +894,7 @@ async function main(): Promise<void> {
   const POWER_DRAIN_RATE  = 1.5;        // se descarga 1.5× más rápido al soltar
   const POWER_RADIUS      = 10;
   const unleashPower = () => {
+    canito.howl();
     effects.spawnShockwave(canitoPos, POWER_RADIUS);
     sound.powerBlast();
 
@@ -936,14 +988,67 @@ async function main(): Promise<void> {
     victoryEl.classList.remove('hidden');
   };
 
-  // ── Segunda oleada de reinas tras cruzar la Plaza Independencia ───────────
-  // La plaza ocupa x ∈ [-120, 120]; al salir por el oeste, brota un enjambre
-  // de Reinas de la Vendimia alrededor de Canito.
-  let queenWaveTriggered = false;
-  const checkQueenWave = () => {
-    if (queenWaveTriggered || gameOver || victory) return;
-    if (canitoPos.x > -130) return;
-    queenWaveTriggered = true;
+  // ── Cierre del Nivel 1: secuencia cinemática al caer el Carro ──────────────
+  // No es inmediato: el carro queda en escena estallando en cadena durante un
+  // par de segundos (como en los juegos), y recién al final se desvanece, se
+  // abre la calle Chile y se anuncia el Nivel 2.
+  const OUTRO_DURATION = 2.6;
+  let outroT      = 0;                      // segundos restantes de la secuencia
+  let outroBoomCD = 0;
+  let outroCart: VendimiaCart | null = null;
+  const startLevel1Outro = (vc: VendimiaCart) => {
+    if (outroCart) return;
+    outroCart   = vc;
+    outroT      = OUTRO_DURATION;
+    outroBoomCD = 0;
+    flashBanner('💥 ¡El Carro de la Vendimia se viene abajo!', '#ff8a40');
+  };
+  const updateLevel1Outro = (dt: number) => {
+    if (outroT <= 0) return;
+    outroT      -= dt;
+    outroBoomCD -= dt;
+    // Estallidos en cadena salteados alrededor del carro
+    if (outroCart && outroBoomCD <= 0) {
+      outroBoomCD = 0.16 + Math.random() * 0.12;
+      const p = outroCart.position.clone();
+      p.x += (Math.random() - 0.5) * 5.5;
+      p.z += (Math.random() - 0.5) * 5.5;
+      p.y  = 0.5 + Math.random() * 1.6;
+      effects.spawnExplosion(p);
+      sound.boom();
+    }
+    if (outroT <= 0) {
+      // Estallido final: el carro se desvanece y se abre el paso al Nivel 2
+      if (outroCart) {
+        effects.spawnExplosion(outroCart.position.clone());
+        effects.spawnShockwave(outroCart.position.clone(), 9);
+        outroCart.remove(engine.scene);
+        outroCart = null;
+      }
+      sound.boom();
+      level1Cleared = true;
+      level = 2;
+      renderLevel();
+      // Carátula "NIVEL 2" con las vidas restantes (como al arrancar un mundo de
+      // Mario). Canito queda invulnerable mientras se muestra la pantalla.
+      invuln = Math.max(invuln, 3.4);
+      showLevelCard(2, '¡A los Portones del Parque!');
+    }
+  };
+
+  // ── Jefe del Nivel 1: el Carro de la Vendimia en la calle Chile ───────────
+  // Al llegar a la calle Chile (borde oeste de la Plaza Independencia) brota un
+  // enjambre de Reinas de la Vendimia alrededor de Canito y aparece el Carro de
+  // la Vendimia bloqueando la avenida. La barrera de Chile impide cruzar al
+  // oeste hasta que el Carro caiga (ver el clamp en el loop).
+  const checkLevel1Boss = () => {
+    if (level1BossActive || gameOver || victory) return;
+    if (canitoPos.x > CHILE_X + 6) return;   // recién al llegar a Chile
+    level1BossActive = true;
+
+    // Checkpoint a la fuente de la plaza para no rehacer todo el Nivel 1 si caés
+    // peleando contra el Carro.
+    checkpoint.x = 26; checkpoint.z = 0; passedPlaza = true;
 
     let spawned = 0, tries = 0;
     while (spawned < 8 && tries++ < 200) {
@@ -954,15 +1059,18 @@ async function main(): Promise<void> {
       if (addZombie(qx, qz, false, false, true)) spawned++;
     }
 
-    // Carro de la Vendimia: te persigue y lanza racimos, botellas y melones
+    // Carro de la Vendimia: aparece SOBRE la calzada de la calle Chile (eje
+    // x=-100), un poco al costado para no caer encima de Canito, bloqueando el
+    // paso. Te persigue por las calles y lanza racimos, botellas y melones.
     const cart = new VendimiaCart();
-    cart.position.set(canitoPos.x - 45, 0, canitoPos.z + 20);
+    const cartZ = canitoPos.z + (canitoPos.z >= 0 ? -16 : 16);
+    cart.position.set(CHILE_X, 0, cartZ);
     cart.group.rotation.y = Math.atan2(canitoPos.x - cart.position.x, canitoPos.z - cart.position.z);
     engine.scene.add(cart.group);
     vendimiaCarts.push(cart);
 
     const warn = document.createElement('div');
-    warn.textContent = '👑 ¡REINAS DE LA VENDIMIA!';
+    warn.textContent = '👑 ¡EL CARRO DE LA VENDIMIA!';
     warn.style.cssText = `
       position: fixed; top: 38%; left: 50%; transform: translate(-50%, -50%);
       font-size: 3rem; font-weight: 800;
@@ -981,6 +1089,12 @@ async function main(): Promise<void> {
   const _zTarget = new THREE.Vector3();      // target reusable (humano más cercano)
   const zHazards: { x: number; z: number }[] = [];   // posiciones de zombies (pánico del tránsito)
   const INNOCENT_PENALTY = 2;                        // vida que pierde Canito al matar un inocente
+
+  // Distracción de los zombies: sólo se desvían por un peatón/auto si lo tienen
+  // MUY cerca. Si el civil huye más allá de este radio, el zombie deja de
+  // correrlo y vuelve a ir por Canito, así no se pierden por toda la escena.
+  const CIV_HUNT_R = 16;                             // radio para cazar peatones
+  const VEH_HUNT_R = 12;                             // radio para embestir autos/motos
 
   // Atropello de los vehículos en pánico: mata civiles/zombies y lastima a Canito.
   const trafficRunOver = (x: number, z: number): boolean => {
@@ -1018,6 +1132,16 @@ async function main(): Promise<void> {
       passedPlaza = true;
       checkpoint.x = 26;  // junto a la fuente, fuera de su estanque
       checkpoint.z = 0;
+    }
+
+    // ── Barrera de la calle Chile (frontera Nivel 1 ↔ Nivel 2) ───────────────
+    // No se puede avanzar al oeste de Chile hasta vencer al Carro de la Vendimia.
+    if (!level1Cleared && canitoPos.x < CHILE_X) {
+      canitoPos.x = CHILE_X;
+      if (level1BossActive && performance.now() - chileHintAt > 4000) {
+        chileHintAt = performance.now();
+        flashBanner('¡Vencé al Carro de la Vendimia para cruzar Chile! 🍇', '#ff50d0');
+      }
     }
 
     effects.update(dt);
@@ -1063,6 +1187,7 @@ async function main(): Promise<void> {
           savedCount++; hudSaved.textContent = savedCount.toString();
           if (canitoHP < MAX_HP) setHP(Math.min(MAX_HP, canitoHP + 2));
           effects.spawnShockwave(new THREE.Vector3(sx, 0.3, sz), 2.2);
+          canito.bark();
           sound.bark();
         },
       );
@@ -1158,6 +1283,7 @@ async function main(): Promise<void> {
       const fb = new Fireball(origin, tmpDir);
       engine.scene.add(fb.group);
       fireballs.push(fb);
+      canito.bark();
       sound.bark();
     }
 
@@ -1176,17 +1302,19 @@ async function main(): Promise<void> {
       // Si está sosteniendo a un civil (cuenta regresiva), queda quieto: no
       // persigue ni ataca a Canito hasta convertir/soltar a la víctima.
       if (z.grabbing) continue;
-      // Target: el humano más cercano. Los zombies normales también cazan a los
-      // civiles; los jefes/throwers/reinas siguen yendo por Canito.
+      // Target: Canito por defecto. Los zombies normales sólo se desvían por un
+      // peatón/auto si lo tienen a mano (dentro de su radio de caza); si la
+      // presa huye lejos, la sueltan y vuelven por Canito. Los jefes/throwers/
+      // reinas siempre van por Canito.
       let tgt: THREE.Vector3 = canitoPos;
       let tgtIsCanito = true;
       if (!z.isThrower && !z.isQueen && !z.isCaballito && !z.isBoss) {
         let bd = Math.hypot(canitoPos.x - z.position.x, canitoPos.z - z.position.z);
         let bx = canitoPos.x, bz = canitoPos.z, isCan = true;
         const nc = civilians.nearest(z.position.x, z.position.z);
-        if (nc && nc.d < bd) { bd = nc.d; bx = nc.x; bz = nc.z; isCan = false; }
-        const nv = traffic.nearest(z.position.x, z.position.z);   // también cazan autos/motos
-        if (nv && nv.d < bd) { bd = nv.d; bx = nv.x; bz = nv.z; isCan = false; }
+        if (nc && nc.d < bd && nc.d < CIV_HUNT_R) { bd = nc.d; bx = nc.x; bz = nc.z; isCan = false; }
+        const nv = traffic.nearest(z.position.x, z.position.z);   // también embisten autos/motos
+        if (nv && nv.d < bd && nv.d < VEH_HUNT_R) { bd = nv.d; bx = nv.x; bz = nv.z; isCan = false; }
         if (!isCan) { _zTarget.set(bx, 0, bz); tgt = _zTarget; tgtIsCanito = false; }
       }
       const r = z.update(dt, tgt, worldColliders);
@@ -1213,6 +1341,17 @@ async function main(): Promise<void> {
           const gb = new GrapeBunch(thr.origin, thr.vel);
           engine.scene.add(gb.group);
           grapeBunches.push(gb);
+          sound.whoosh();
+        }
+      }
+
+      // Walkers "bailarines": mientras bailan lanzan empanadas y mates
+      if (!gameOver) {
+        const sn = z.tryThrowSnack(canitoPos, dt);
+        if (sn) {
+          const s = new GauchoSnack(sn.origin, sn.vel, sn.kind);
+          engine.scene.add(s.group);
+          gauchoSnacks.push(s);
           sound.whoosh();
         }
       }
@@ -1330,6 +1469,23 @@ async function main(): Promise<void> {
       }
     }
 
+    // ── Empanadas y mates (gauchos bailarines) ───────────────────────────────
+    for (let i = gauchoSnacks.length - 1; i >= 0; i--) {
+      const s = gauchoSnacks[i];
+      s.update(dt, colliders);
+      if (s.alive) {
+        const d = Math.hypot(s.position.x - canitoPos.x, s.position.z - canitoPos.z);
+        if (d < GauchoSnack.RADIUS + 0.5 && s.position.y < 2.2) {
+          if (!gameOver) setHP(canitoHP - s.damage, s.position.x, s.position.z);
+          s.kill();
+        }
+      }
+      if (!s.alive) {
+        s.remove(engine.scene);
+        gauchoSnacks.splice(i, 1);
+      }
+    }
+
     // ── Gaucho cars ────────────────────────────────────────────────────────
     for (const gc of gauchoCars) {
       if (!gc.alive) continue;
@@ -1379,7 +1535,7 @@ async function main(): Promise<void> {
     // ── Carro de la Vendimia: persigue, embiste y lanza proyectiles ──────────
     for (const vc of vendimiaCarts) {
       if (!vc.alive) continue;
-      const r = vc.update(dt, canitoPos, colliders);
+      const r = vc.update(dt, canitoPos, colliders, onRoad);
       if (r.hitTarget && !gameOver) {
         setHP(canitoHP - VendimiaCart.HIT_DAMAGE, vc.position.x, vc.position.z);
         sound.boom();
@@ -1479,7 +1635,9 @@ async function main(): Promise<void> {
                 hudKills.textContent = killCount.toString();
                 effects.spawnExplosion(vc.position.clone());
                 sound.boom();
-                vc.remove(engine.scene);
+                // No se remueve al instante: arranca la secuencia cinemática de
+                // fin de Nivel 1 (estallidos en cadena → se abre la calle Chile).
+                startLevel1Outro(vc);
               }
               break;
             }
@@ -1539,7 +1697,8 @@ async function main(): Promise<void> {
 
     // ── Ambush + victory + coords HUD ──────────────────────────────────────
     checkAmbush();
-    checkQueenWave();
+    checkLevel1Boss();
+    updateLevel1Outro(dt);
     checkVictory();
     const [lat, lon] = proj.unproject(canitoPos.x, canitoPos.z);
     hudLat.textContent = lat.toFixed(5);

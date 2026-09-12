@@ -1,19 +1,18 @@
-// Civiles aterrados que escapan de los zombies. Cuando un zombie los ALCANZA, no
-// los convierte al toque: los AGARRA y queda sosteniéndolos, con una cuenta
-// regresiva de 10 s sobre la cabeza. Si Canito mata a ese zombie antes de que
-// llegue a 0 → la persona se SALVA (recompensa). Si no → se transforma en zombie.
+// Civiles aterrados (modelos low-poly CC0 animados) que escapan de los zombies.
+// Cuando un zombie ALCANZA a uno, no lo convierte al toque: lo AGARRA y queda
+// sosteniéndolo con una cuenta regresiva de 10 s sobre la cabeza. Si Canito mata
+// a ese zombie antes de 0 → la persona se SALVA (recompensa). Si no → se
+// transforma en zombie.
 import * as THREE from 'three';
 import type { AABB } from '../entities/Canito';
-import { buildPerson, animateWalk, type CharRig } from './People';
+import type { CharacterModel, CharInstance } from '../world/CharacterModel';
 
-// El zombie referenciado: necesitamos su posición, si sigue vivo, y poder
-// marcarlo como "ocupado agarrando" (queda quieto). ZombieGaucho lo cumple.
 interface ZRef { position: THREE.Vector3; alive: boolean; grabbing: boolean; }
 
 type State = 'flee' | 'grabbed';
 interface Civ {
-  rig: CharRig; x: number; z: number; tx: number; tz: number;
-  state: State; speed: number; gait: number; scared: boolean;
+  inst: CharInstance; x: number; z: number; tx: number; tz: number;
+  state: State; speed: number; scared: boolean; anim: string;
   grabBy: ZRef | null; grabT: number; sprite: THREE.Sprite | null; lastSec: number;
   col: AABB;
 }
@@ -22,9 +21,9 @@ const COL_HALF = 0.45;
 const FAR: AABB = { minX: 1e6, maxX: 1e6, minZ: 1e6, maxZ: 1e6 };
 
 const DANGER     = 46;     // ven un zombie a esta distancia → huyen aterrados
-const GRAB_RANGE = 1.7;    // el zombie llega → lo agarra
-const GRAB_TIME  = 10;     // segundos para rescatarlo antes de que se convierta
-const FLEE_MULT  = 2.2;    // corren rápido al huir (los runners igual los pillan)
+const GRAB_RANGE = 1.7;
+const GRAB_TIME  = 10;     // segundos para rescatarlo antes de convertirse
+const FLEE_MULT  = 2.2;
 
 // ── Cartelito de cuenta regresiva (sprite que mira a la cámara) ──────────────
 const _numMat = new Map<number, THREE.SpriteMaterial>();
@@ -48,26 +47,25 @@ export class CivilianManager {
   private civs: Civ[] = [];
   private _cols: AABB[] = [];
 
-  constructor(scene: THREE.Scene, count: number, spawn: () => [number, number]) {
+  constructor(scene: THREE.Scene, count: number, spawn: () => [number, number], models: CharacterModel[]) {
     for (let i = 0; i < count; i++) {
-      const rig = buildPerson(0.95 + Math.random() * 0.12);
+      const model = models[(Math.random() * models.length) | 0];
+      const inst = model.create();
       const [x, z] = spawn();
-      rig.group.position.set(x, 0, z);
-      scene.add(rig.group);
-      rig.group.traverse(o => { (o as THREE.Mesh).castShadow = false; });
+      inst.group.position.set(x, 0, z);
+      scene.add(inst.group);
       const col: AABB = { minX: x - COL_HALF, maxX: x + COL_HALF, minZ: z - COL_HALF, maxZ: z + COL_HALF };
       this._cols.push(col);
       this.civs.push({
-        rig, x, z, tx: x, tz: z, state: 'flee', scared: false,
-        speed: 1.6 + Math.random() * 0.8, gait: Math.random() * 6.28,
-        grabBy: null, grabT: 0, sprite: null, lastSec: -1, col,
+        inst, x, z, tx: x, tz: z, state: 'flee', scared: false, anim: 'idle',
+        speed: 1.6 + Math.random() * 0.8, grabBy: null, grabT: 0, sprite: null, lastSec: -1, col,
       });
     }
   }
 
   colliders(): AABB[] { return this._cols; }
 
-  /** Mata civiles vivos en el radio (atropello de autos). No cuenta los agarrados. */
+  /** Mata civiles vivos en el radio (atropello de autos). */
   killArea(x: number, z: number, r: number): number {
     let n = 0;
     for (let i = this.civs.length - 1; i >= 0; i--) {
@@ -75,7 +73,7 @@ export class CivilianManager {
       if (Math.hypot(c.x - x, c.z - z) < r) {
         if (c.grabBy) c.grabBy.grabbing = false;
         Object.assign(c.col, FAR);
-        c.rig.group.parent?.remove(c.rig.group);
+        c.inst.group.parent?.remove(c.inst.group);
         this.civs.splice(i, 1);
         n++;
       }
@@ -98,6 +96,11 @@ export class CivilianManager {
     for (const c of this.civs) if (c.state !== 'grabbed') out.push({ x: c.x, z: c.z });
   }
 
+  private _anim(c: Civ, name: 'idle' | 'walk' | 'run'): void {
+    if (c.anim === name) return;
+    c.anim = name; c.inst.play(name);
+  }
+
   /** Actualiza los civiles. Devuelve dónde nacen zombies (convertidos). `onSave`
    *  se llama al rescatar a una persona (recompensa). */
   update(
@@ -115,9 +118,8 @@ export class CivilianManager {
       if (c.state === 'grabbed') {
         const z = c.grabBy;
         if (!z || !z.alive) {
-          // ¡Lo mataron a tiempo! → SALVADO
-          if (c.sprite) { c.rig.group.remove(c.sprite); c.sprite = null; }
-          c.rig.group.rotation.z = 0; c.rig.group.position.y = 0;
+          if (c.sprite) { c.inst.group.remove(c.sprite); c.sprite = null; }
+          c.inst.group.rotation.z = 0; c.inst.group.position.y = 0;
           c.state = 'flee'; c.grabBy = null;
           onSave?.(c.x, c.z);
           continue;
@@ -125,19 +127,15 @@ export class CivilianManager {
         c.grabT -= dt;
         const sec = Math.max(0, Math.ceil(c.grabT));
         if (sec !== c.lastSec && c.sprite) { c.sprite.material = numberMaterial(sec); c.lastSec = sec; }
-        // forcejeo
-        c.rig.group.position.set(c.x, 0.32, c.z);
-        c.rig.group.rotation.z = Math.sin(now * 0.03) * 0.28;
-        const k = Math.sin(now * 0.05) * 0.5;
-        c.rig.legL.rotation.x = k; c.rig.legR.rotation.x = -k;
-        c.rig.armL.rotation.x = -2.3 + Math.sin(now * 0.04) * 0.4;
-        c.rig.armR.rotation.x = -2.3 - Math.sin(now * 0.04) * 0.4;
+        c.inst.group.position.set(c.x, 0.1, c.z);
+        c.inst.group.rotation.z = Math.sin(now * 0.03) * 0.22;   // forcejeo
+        this._anim(c, 'idle');
+        if (c.inst.group.visible) c.inst.update(dt);
         if (c.grabT <= 0) {
-          // Tiempo agotado → se transforma en zombie
           born.push([c.x, c.z]);
           z.grabbing = false;
-          if (c.sprite) c.rig.group.remove(c.sprite);
-          scene.remove(c.rig.group);
+          if (c.sprite) c.inst.group.remove(c.sprite);
+          scene.remove(c.inst.group);
           Object.assign(c.col, FAR);
           this.civs.splice(i, 1);
         }
@@ -146,22 +144,20 @@ export class CivilianManager {
 
       // ── Culling: civiles lejos del jugador se congelan e invisibilizan ──────
       const ddx = c.x - px, ddz = c.z - pz;
-      const far = ddx * ddx + ddz * ddz > CULL2;
-      if (far) {
-        // pero igual pueden ser agarrados (amenaza fuera de cámara)
+      if (ddx * ddx + ddz * ddz > CULL2) {
         let gz: ZRef | null = null, gd = Infinity;
         for (const z of zombies) {
           if (!z.alive || z.grabbing) continue;
           const d = Math.hypot(z.position.x - c.x, z.position.z - c.z);
           if (d < gd) { gd = d; gz = z; }
         }
-        if (gz && gd < GRAB_RANGE) { this._grab(c, gz); }
-        if (c.rig.group.visible) c.rig.group.visible = false;
+        if (gz && gd < GRAB_RANGE) this._grab(c, gz);
+        if (c.inst.group.visible) c.inst.group.visible = false;
         continue;
       }
-      if (!c.rig.group.visible) c.rig.group.visible = true;
+      if (!c.inst.group.visible) c.inst.group.visible = true;
 
-      // ── Zombie más cercano (vivo y libre) ───────────────────────────────────
+      // ── Zombie más cercano (vivo) ───────────────────────────────────────────
       let nz: ZRef | null = null, nd = Infinity, nzx = 0, nzz = 0;
       for (const z of zombies) {
         if (!z.alive) continue;
@@ -169,11 +165,10 @@ export class CivilianManager {
         if (d < nd) { nd = d; nz = z; nzx = z.position.x; nzz = z.position.z; }
       }
 
-      // ¿Lo alcanzó un zombie libre? → AGARRE
       if (nz && nd < GRAB_RANGE && !nz.grabbing) { this._grab(c, nz); continue; }
 
       c.scared = !!nz && nd < DANGER;
-      if (c.scared) {                          // huye en dirección opuesta
+      if (c.scared) {
         const ax = c.x - nzx, az = c.z - nzz, ad = Math.hypot(ax, az) || 1;
         c.tx = c.x + (ax / ad) * 16; c.tz = c.z + (az / ad) * 16;
       }
@@ -182,21 +177,18 @@ export class CivilianManager {
       const dx = c.tx - c.x, dz = c.tz - c.z, d = Math.hypot(dx, dz);
       if (d < 0.6) {
         if (!c.scared) { c.tx = c.x + (Math.random() - 0.5) * 30; c.tz = c.z + (Math.random() - 0.5) * 30; }
+        this._anim(c, 'idle');
       } else {
         const spd = c.speed * (c.scared ? FLEE_MULT : 1.3) * dt;
         const ux = dx / d, uz = dz / d;
         const nx = c.x + ux * spd, nz2 = c.z + uz * spd;
         if (!this._hits(nx, c.z, colliders)) c.x = nx;
         if (!this._hits(c.x, nz2, colliders)) c.z = nz2;
-        c.rig.group.rotation.y = Math.atan2(ux, uz);
-        c.gait += dt * c.speed * (c.scared ? 6 : 4);
-        animateWalk(c.rig, c.gait, c.scared ? 1.7 : 1.2);
-        if (c.scared) {                        // brazos arriba (terror)
-          c.rig.armL.rotation.x = -2.1 + Math.sin(c.gait) * 0.3;
-          c.rig.armR.rotation.x = -2.1 - Math.sin(c.gait) * 0.3;
-        }
+        c.inst.group.rotation.y = Math.atan2(ux, uz);
+        this._anim(c, c.scared ? 'run' : 'walk');
       }
-      c.rig.group.position.set(c.x, 0, c.z);
+      c.inst.group.position.set(c.x, 0, c.z);
+      c.inst.update(dt);                       // sólo para los cercanos
       c.col.minX = c.x - COL_HALF; c.col.maxX = c.x + COL_HALF;
       c.col.minZ = c.z - COL_HALF; c.col.maxZ = c.z + COL_HALF;
     }
@@ -206,8 +198,8 @@ export class CivilianManager {
   private _grab(c: Civ, z: ZRef): void {
     c.state = 'grabbed'; c.grabBy = z; c.grabT = GRAB_TIME; z.grabbing = true;
     const spr = new THREE.Sprite(numberMaterial(GRAB_TIME));
-    spr.scale.set(1.4, 1.4, 1); spr.position.set(0, 2.8, 0);
-    c.rig.group.add(spr); c.sprite = spr; c.lastSec = GRAB_TIME;
+    spr.scale.set(1.4, 1.4, 1); spr.position.set(0, 2.4, 0);
+    c.inst.group.add(spr); c.sprite = spr; c.lastSec = GRAB_TIME;
   }
 
   private _hits(x: number, z: number, colliders: AABB[]): boolean {

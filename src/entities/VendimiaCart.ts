@@ -100,7 +100,12 @@ export class VendimiaCart {
     return false;
   }
 
-  update(dt: number, target: THREE.Vector3, colliders: AABB[] = []): { hitTarget: boolean } {
+  update(
+    dt: number,
+    target: THREE.Vector3,
+    colliders: AABB[] = [],
+    onRoad?: (x: number, z: number) => boolean,
+  ): { hitTarget: boolean } {
     if (!this.alive) return { hitTarget: false };
     this._attackCooldown -= dt;
 
@@ -126,9 +131,14 @@ export class VendimiaCart {
       const stepZ = Math.cos(ang) * VendimiaCart.SPEED * dt;
       const px = this.position.x, pz = this.position.z;
       const nx = px + stepX, nz = pz + stepZ;
-      if (!this._collides(nx, nz, colliders)) { this.position.x = nx; this.position.z = nz; }
-      else if (!this._collides(nx, pz, colliders)) { this.position.x = nx; }
-      else if (!this._collides(px, nz, colliders)) { this.position.z = nz; }
+      // El carro es un vehículo: sólo circula por la calzada (onRoad) y nunca
+      // entra en edificios (colliders). Sobre la grilla de calles eje-alineada
+      // de Mendoza, el deslizamiento por ejes lo hace doblar en las esquinas.
+      const free = (cx: number, cz: number): boolean =>
+        !this._collides(cx, cz, colliders) && (!onRoad || onRoad(cx, cz));
+      if (free(nx, nz)) { this.position.x = nx; this.position.z = nz; }
+      else if (free(nx, pz)) { this.position.x = nx; }
+      else if (free(px, nz)) { this.position.z = nz; }
     }
     return { hitTarget: false };
   }

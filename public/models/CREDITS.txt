@@ -1,0 +1,5 @@
+Personajes civiles (low-poly animados):
+- civ-casual.glb  — "Casual Character" by Quaternius
+- civ-suit.glb    — "Business Man" by Quaternius
+Licencia: CC0 (dominio público). Vía poly.pizza. https://quaternius.com
+Animaciones: Idle / Walk / Run (entre otras). Rig: CharacterArmature.

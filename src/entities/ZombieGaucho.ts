@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { AABB } from './Canito';
+import type { SnackKind } from './GauchoSnack';
 
 // ── Shared materials (one set across all zombies) ─────────────────────────
 const MAT_SKIN   = new THREE.MeshLambertMaterial({ color: 0x6e7858, flatShading: true });
@@ -56,6 +57,8 @@ export class ZombieGaucho {
   readonly isQueen: boolean;
   readonly isCaballito: boolean;
   grabbing = false;          // está sosteniendo a un civil (queda quieto)
+  private _dancingNow = false;   // ¿está en su baile ahora mismo? (walkers)
+  get isDancing(): boolean { return this._dancingNow; }
   private _hp: number;
   private _fastGait = false;        // runner-style leg/bob animation
   private _phase = Math.random() * Math.PI * 2;
@@ -68,9 +71,12 @@ export class ZombieGaucho {
   private _legL!: THREE.Object3D;
   private _legR!: THREE.Object3D;
   private _torso!: THREE.Object3D;
-  private _armL?: THREE.Mesh;
-  private _armR?: THREE.Mesh;
+  private _head?: THREE.Object3D;
+  private _armL?: THREE.Object3D;
+  private _armR?: THREE.Object3D;
   private _speed: number;
+  private readonly _style = Math.random() * Math.PI * 2;
+  private readonly _limp = 0.85 + Math.random() * 0.35;
 
   // Walkers break into a dance every so often; runners trip every so often.
   private _danceTimer    = 0;
@@ -105,6 +111,10 @@ export class ZombieGaucho {
   static readonly GRAPE_INTERVAL   = 1.8;
   static readonly GRAPE_STANDOFF   = 9;    // stop advancing once this close
   static readonly BOSS_THROW_INTERVAL = 1.5;
+  // Walker-specific: los "bailarines" lanzan empanadas y mates mientras bailan
+  static readonly SNACK_RANGE_MIN  = 5;
+  static readonly SNACK_RANGE_MAX  = 38;
+  static readonly SNACK_INTERVAL   = 1.0;
 
   constructor(opts: { runner?: boolean; thrower?: boolean; boss?: boolean; queen?: boolean; caballito?: boolean } = {}) {
     this.isBoss      = !!opts.boss;
@@ -152,77 +162,93 @@ export class ZombieGaucho {
     const tunicMat = this.isBoss    ? MAT_TUNIC_BOSS
                    : this.isThrower ? MAT_TUNIC_THROW
                    : MAT_TUNIC;
-    this._torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.85, 0.40), tunicMat);
-    this._torso.position.y = 1.10;
-    if (this.isRunner) this._torso.rotation.x = 0.18;
-    this.group.add(this._torso);
+    const body = new THREE.Group();
+    body.position.y = 1.08;
+    if (this.isRunner) body.rotation.x = 0.18;
+    this.group.add(body);
+    this._torso = body;
+
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.36, 0.78, 8), tunicMat);
+    torso.position.y = 0.03;
+    body.add(torso);
 
     const ponchoMat = this.isBoss    ? MAT_PONCHO_BOSS
                     : this.isThrower ? MAT_PONCHO_THROW
                     : this.isRunner  ? MAT_PONCHO_RUN
                     : MAT_PONCHO;
     const poncho = new THREE.Mesh(new THREE.ConeGeometry(0.58, 0.55, 8), ponchoMat);
-    poncho.position.y = 1.45;
+    poncho.position.y = 0.39;
     if (this.isRunner) poncho.rotation.x = 0.18;
-    this.group.add(poncho);
+    body.add(poncho);
 
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), MAT_SKIN);
-    head.position.set(this.isRunner ? 0.05 : 0, this.isRunner ? 1.72 : 1.75, this.isRunner ? 0.05 : 0);
-    this.group.add(head);
+    const headPivot = new THREE.Group();
+    headPivot.position.set(this.isRunner ? 0.05 : 0, this.isRunner ? 0.67 : 0.70, this.isRunner ? 0.05 : 0);
+    body.add(headPivot);
+    this._head = headPivot;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), MAT_SKIN);
+    headPivot.add(head);
 
     // Eyes: boss magenta, throwers purple, runners orange, walkers red
     const eyeMat = this.isBoss    ? MAT_EYE_BOSS
                  : this.isThrower ? MAT_EYE_THROW
                  : this.isRunner  ? MAT_EYE_RUN
                  : MAT_EYE;
-    const eyeY = this.isRunner ? 1.75 : 1.78;
+    const eyeY = this.isRunner ? 0.02 : 0.03;
     const eyeZ = this.isRunner ? 0.23 : 0.20;
     const eyeXOff = this.isRunner ? 0.05 : 0;
     const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.035, 4, 4), eyeMat);
     eyeL.position.set(-0.08 + eyeXOff, eyeY, eyeZ);
-    this.group.add(eyeL);
+    headPivot.add(eyeL);
     const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.035, 4, 4), eyeMat);
     eyeR.position.set( 0.08 + eyeXOff, eyeY, eyeZ);
-    this.group.add(eyeR);
+    headPivot.add(eyeR);
 
     // Chambergo (gaucho hat): wide brim + low crown
     const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.04, 12), MAT_HAT);
-    brim.position.y = 1.93;
-    this.group.add(brim);
+    brim.position.y = 0.18;
+    headPivot.add(brim);
     const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.20, 0.20, 0.17, 8), MAT_HAT);
-    crown.position.y = 2.02;
-    this.group.add(crown);
+    crown.position.y = 0.27;
+    headPivot.add(crown);
 
-    // Arms outstretched (zombie pose)
-    const armGeo = new THREE.BoxGeometry(0.12, 0.55, 0.12);
-    const armL = new THREE.Mesh(armGeo, MAT_TUNIC);
-    armL.position.set(-0.36, 1.25, 0.20);
-    armL.rotation.x = -0.55;
-    this.group.add(armL);
-    const armR = new THREE.Mesh(armGeo, MAT_TUNIC);
-    armR.position.set( 0.36, 1.25, 0.20);
-    armR.rotation.x = -0.55;
-    this.group.add(armR);
-    this._armL = armL;
-    this._armR = armR;
+    // Arms with shoulder pivots instead of rotating one rigid box.
+    const makeArm = (sx: -1 | 1): THREE.Group => {
+      const pivot = new THREE.Group();
+      pivot.position.set(sx * 0.34, 0.18, 0.08);
+      pivot.rotation.x = -1.0;
+      pivot.rotation.z = sx * 0.22;
+      body.add(pivot);
 
-    // Legs (bombachas)
-    const legGeo = new THREE.BoxGeometry(0.20, 0.65, 0.20);
-    this._legL = new THREE.Mesh(legGeo, MAT_PANTS);
-    this._legL.position.set(-0.14, 0.35, 0);
-    this.group.add(this._legL);
-    this._legR = new THREE.Mesh(legGeo, MAT_PANTS);
-    this._legR.position.set( 0.14, 0.35, 0);
-    this.group.add(this._legR);
+      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.34, 7), tunicMat);
+      upper.position.y = -0.17;
+      pivot.add(upper);
+      const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.30, 7), MAT_SKIN);
+      forearm.position.set(0, -0.46, 0.02);
+      forearm.rotation.x = -0.20;
+      pivot.add(forearm);
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.065, 7, 5), MAT_SKIN);
+      hand.position.set(0, -0.62, 0.06);
+      pivot.add(hand);
+      return pivot;
+    };
+    this._armL = makeArm(-1);
+    this._armR = makeArm(1);
 
-    // Boots
-    const bootGeo = new THREE.BoxGeometry(0.24, 0.12, 0.30);
-    const bootL = new THREE.Mesh(bootGeo, MAT_BOOTS);
-    bootL.position.set(-0.14, 0.06, 0.05);
-    this.group.add(bootL);
-    const bootR = new THREE.Mesh(bootGeo, MAT_BOOTS);
-    bootR.position.set( 0.14, 0.06, 0.05);
-    this.group.add(bootR);
+    // Legs with hip pivots and rounded bombachas.
+    const makeLeg = (sx: -1 | 1): THREE.Group => {
+      const pivot = new THREE.Group();
+      pivot.position.set(sx * 0.15, 0.68, 0.02);
+      this.group.add(pivot);
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.12, 0.58, 7), MAT_PANTS);
+      leg.position.y = -0.30;
+      pivot.add(leg);
+      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.30), MAT_BOOTS);
+      boot.position.set(0, -0.61, 0.07);
+      pivot.add(boot);
+      return pivot;
+    };
+    this._legL = makeLeg(-1);
+    this._legR = makeLeg(1);
 
     this.group.traverse(m => {
       if ((m as THREE.Mesh).isMesh) (m as THREE.Mesh).castShadow = true;
@@ -264,6 +290,7 @@ export class ZombieGaucho {
     head.position.set(0, 3.5, 0.95);
     this.group.add(head);
     this._torso = head;
+    this._head = head;
     m(new THREE.BoxGeometry(0.32, 0.36, 0.62), MAT_MARBLE, 0, 0.0, 0.24, head);
     m(new THREE.BoxGeometry(0.24, 0.24, 0.3),  MAT_MARBLE, 0, -0.1, 0.52, head);   // muzzle
     for (const sx of [-1, 1] as const) {
@@ -316,31 +343,34 @@ export class ZombieGaucho {
     this.group.add(skirt);
 
     // Head + hair
+    const headPivot = new THREE.Group();
+    headPivot.position.y = 1.78;
+    this.group.add(headPivot);
+    this._head = headPivot;
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), MAT_QUEEN_SKIN);
-    head.position.y = 1.78;
-    this.group.add(head);
+    headPivot.add(head);
     const hair = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 6), MAT_QUEEN_HAIR);
-    hair.position.set(0, 1.82, -0.06);
+    hair.position.set(0, 0.04, -0.06);
     hair.scale.set(1, 0.9, 0.7);
-    this.group.add(hair);
+    headPivot.add(hair);
 
     // Glowing magenta eyes
     const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.035, 4, 4), MAT_EYE_QUEEN);
-    eyeL.position.set(-0.08, 1.80, 0.20);
-    this.group.add(eyeL);
+    eyeL.position.set(-0.08, 0.02, 0.20);
+    headPivot.add(eyeL);
     const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.035, 4, 4), MAT_EYE_QUEEN);
-    eyeR.position.set( 0.08, 1.80, 0.20);
-    this.group.add(eyeR);
+    eyeR.position.set( 0.08, 0.02, 0.20);
+    headPivot.add(eyeR);
 
     // Crown / tiara — golden band with five spikes
     const crownBand = new THREE.Mesh(new THREE.CylinderGeometry(0.20, 0.20, 0.06, 10), MAT_QUEEN_GOLD);
-    crownBand.position.y = 2.00;
-    this.group.add(crownBand);
+    crownBand.position.y = 0.22;
+    headPivot.add(crownBand);
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * Math.PI * 2;
       const spike = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.16, 6), MAT_QUEEN_GOLD);
-      spike.position.set(Math.cos(a) * 0.20, 2.08, Math.sin(a) * 0.20);
-      this.group.add(spike);
+      spike.position.set(Math.cos(a) * 0.20, 0.30, Math.sin(a) * 0.20);
+      headPivot.add(spike);
     }
 
     // Arms outstretched (zombie pose)
@@ -353,6 +383,8 @@ export class ZombieGaucho {
     armR.position.set( 0.32, 1.28, 0.18);
     armR.rotation.x = -0.60;
     this.group.add(armR);
+    this._armL = armL;
+    this._armR = armR;
 
     // Legs (animated) + heels, partly tucked under the gown
     const legGeo = new THREE.BoxGeometry(0.14, 0.50, 0.14);
@@ -383,6 +415,18 @@ export class ZombieGaucho {
       if (x + r > c.minX && x - r < c.maxX && z + r > c.minZ && z - r < c.maxZ) return true;
     }
     return false;
+  }
+
+  private _blendRotation(obj: THREE.Object3D | undefined, x: number, z: number, amount: number, y?: number): void {
+    if (!obj) return;
+    obj.rotation.x += (x - obj.rotation.x) * amount;
+    if (y !== undefined) obj.rotation.y += (y - obj.rotation.y) * amount;
+    obj.rotation.z += (z - obj.rotation.z) * amount;
+  }
+
+  private _poseArms(leftX: number, rightX: number, leftZ: number, rightZ: number, amount = 0.35): void {
+    this._blendRotation(this._armL, leftX, leftZ, amount);
+    this._blendRotation(this._armR, rightX, rightZ, amount);
   }
 
   /** Returns the start position + velocity of a thrown car if this thrower
@@ -442,6 +486,34 @@ export class ZombieGaucho {
     return { origin, vel };
   }
 
+  /** Gauchos "bailarines" (walkers): mientras bailan lanzan empanadas y mates.
+   *  Devuelve origen + velocidad + tipo del proyectil, o null. */
+  tryThrowSnack(target: THREE.Vector3, dt: number): { origin: THREE.Vector3; vel: THREE.Vector3; kind: SnackKind } | null {
+    // Sólo los caminantes comunes, y sólo mientras están en su baile.
+    if (this.isRunner || this.isThrower || this.isQueen || this.isCaballito || this.isBoss) return null;
+    if (!this._dancingNow) return null;
+    this._throwCooldown -= dt;
+    if (this._throwCooldown > 0) return null;
+    const dx = target.x - this.group.position.x;
+    const dz = target.z - this.group.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < ZombieGaucho.SNACK_RANGE_MIN || dist > ZombieGaucho.SNACK_RANGE_MAX) return null;
+
+    this._throwCooldown = ZombieGaucho.SNACK_INTERVAL + (Math.random() - 0.5) * 0.4;
+    this._biteTimer = ZombieGaucho.BITE_DURATION;   // reutiliza el envión como lanzamiento
+
+    const g = 13;                   // matches GauchoSnack.GRAVITY
+    const tFlight = 0.7 + dist * 0.013;
+    const vy = g * tFlight / 2;
+    const vh = dist / tFlight;
+    const ux = dx / dist, uz = dz / dist;
+    const origin = this.group.position.clone();
+    origin.y += 1.3;
+    origin.x += ux * 0.4; origin.z += uz * 0.4;
+    const kind: SnackKind = Math.random() < 0.5 ? 'empanada' : 'mate';
+    return { origin, vel: new THREE.Vector3(ux * vh, vy, uz * vh), kind };
+  }
+
   /** Caballito de Marly: spit a glob at the target. Origin/velocity, or null. */
   trySpit(target: THREE.Vector3, dt: number): { origin: THREE.Vector3; vel: THREE.Vector3 } | null {
     if (!this.isCaballito) return null;
@@ -476,10 +548,19 @@ export class ZombieGaucho {
     this.group.rotation.y += Math.sin(ph) * 0.35;                 // twist on the spot
     this._torso.rotation.z = Math.sin(ph) * 0.5;                  // big hip sway
     this._torso.rotation.x = Math.sin(ph * 2) * 0.12;
+    if (this._head) {
+      this._head.rotation.x = Math.sin(ph * 1.7) * 0.16;
+      this._head.rotation.z = Math.sin(ph + this._style) * 0.22;
+    }
     this._legL.rotation.x  =  Math.sin(ph) * 0.5;
     this._legR.rotation.x  = -Math.sin(ph) * 0.5;
-    if (this._armL) { this._armL.rotation.x = -2.0 + Math.sin(ph) * 0.9; this._armL.rotation.z =  0.4 + Math.sin(ph) * 0.4; }
-    if (this._armR) { this._armR.rotation.x = -2.0 - Math.sin(ph) * 0.9; this._armR.rotation.z = -0.4 - Math.sin(ph) * 0.4; }
+    this._poseArms(
+      -1.85 + Math.sin(ph) * 0.75,
+      -1.85 - Math.sin(ph) * 0.75,
+       0.55 + Math.sin(ph) * 0.35,
+      -0.55 - Math.sin(ph) * 0.35,
+      0.8,
+    );
   }
 
   /** Trip-and-recover lurch — pitches way forward, nearly hits the ground. */
@@ -492,20 +573,22 @@ export class ZombieGaucho {
     this.group.position.y  = arc * 0.05;
     this._legL.rotation.x  =  arc * 1.3;                                         // legs tangle
     this._legR.rotation.x  = -arc * 0.7;
-    if (this._armL) this._armL.rotation.x = -0.55 - arc * 1.6;                   // flail
-    if (this._armR) this._armR.rotation.x = -0.55 - arc * 1.9;
+    this._poseArms(-0.95 - arc * 1.45, -0.95 - arc * 1.7, 0.55 * arc, -0.55 * arc, 0.65);
+    this._blendRotation(this._head, -0.35 * arc, Math.sin((1 - t) * Math.PI * 5) * 0.25, 0.55);
   }
 
   update(dt: number, target: THREE.Vector3, colliders: AABB[] = []): { hitTarget: boolean } {
     if (!this.alive) return { hitTarget: false };
 
     this._attackCooldown -= dt;
+    this._dancingNow = false;   // se pone en true abajo si el walker está bailando
 
-    // Bite lurch — torso swings forward as if chomping, then snaps back
+    // Bite lurch — torso/head swing forward as if chomping, then snap back.
+    let bitePulse = 0;
     if (this._biteTimer > 0) {
       this._biteTimer -= dt;
       const t = Math.max(0, this._biteTimer / ZombieGaucho.BITE_DURATION); // 1 → 0
-      this._torso.rotation.x = Math.sin((1 - t) * Math.PI) * 0.55;
+      bitePulse = Math.sin((1 - t) * Math.PI);
     }
     const dx = target.x - this.group.position.x;
     const dz = target.z - this.group.position.z;
@@ -521,8 +604,23 @@ export class ZombieGaucho {
         this._attackCooldown = ZombieGaucho.DAMAGE_INTERVAL;
         this._biteTimer = ZombieGaucho.BITE_DURATION;
       }
+      this._phase += dt * (this.isCaballito ? 6 : this._fastGait ? 8 : 4.5);
+      const claw = Math.sin(this._phase + this._style);
+      this._blendRotation(this._torso, 0.16 + bitePulse * 0.62, Math.sin(this._phase * 1.4) * 0.10, 0.42);
+      this._blendRotation(this._head, -0.06 + bitePulse * 0.38, Math.sin(this._phase * 1.8 + this._style) * 0.18, 0.38);
+      this._poseArms(
+        -1.35 - bitePulse * 0.45 + Math.max(0, claw) * 0.18,
+        -1.35 - bitePulse * 0.45 + Math.max(0, -claw) * 0.18,
+         0.24 + bitePulse * 0.18,
+        -0.24 - bitePulse * 0.18,
+        0.42,
+      );
+      this._legL.rotation.x *= 0.88;
+      this._legR.rotation.x *= 0.88;
+      this.group.position.y = Math.abs(Math.sin(this._phase * 2)) * 0.035;
     } else if (dist < ZombieGaucho.DETECT_R) {
-      const ux = dx / dist, uz = dz / dist;
+      const invDist = dist > 0.001 ? 1 / dist : 0;
+      const ux = dx * invDist, uz = dz * invDist;
       this.group.rotation.y = Math.atan2(ux, uz);
 
       // Queens hold a standoff distance and lob grapes; everyone else closes in.
@@ -539,8 +637,9 @@ export class ZombieGaucho {
             this._danceTimer = ZombieGaucho.DANCE_DURATION;
             this._danceCooldown = 4 + Math.random() * 5;
             dancing = true;
+            this._throwCooldown = 0.3;                 // prepara la primera empanada/mate
           }
-          if (dancing) speedMul = 0.25;                // shuffle closer while dancing
+          if (dancing) { speedMul = 0.25; this._dancingNow = true; }   // shuffle + tira comida
         } else if (this.isRunner) {
           if (this._stumbleTimer > 0) { this._stumbleTimer -= dt; stumbling = true; }
           else if ((this._stumbleCooldown -= dt) <= 0) {
@@ -576,31 +675,54 @@ export class ZombieGaucho {
         } else if (stumbling) {
           this._animateStumble();
         } else {
-          const animSpeed = this._fastGait ? 13 : 6;
-          const swing     = this._fastGait ? 1.05 : 0.55;
-          const bobAmt    = this._fastGait ? 0.14 : 0.06;
+          const animSpeed = (this._fastGait ? 13.5 : this.isThrower ? 4.4 : this.isCaballito ? 7 : 5.6) * this._limp;
+          const swing     = this._fastGait ? 1.15 : this.isCaballito ? 0.72 : this.isThrower ? 0.36 : 0.62;
+          const bobAmt    = this._fastGait ? 0.15 : this.isCaballito ? 0.09 : this.isThrower ? 0.035 : 0.065;
           this._phase += dt * animSpeed;
-          const sw = Math.sin(this._phase) * swing;
-          this._legL.rotation.x =  sw;
-          this._legR.rotation.x = -sw;
-          this._torso.rotation.x *= 0.8;     // settle any leftover lurch/trip pitch
-          this._torso.rotation.z = Math.sin(this._phase * 0.5) * 0.06;
+          const sw = Math.sin(this._phase);
+          const sw2 = Math.sin(this._phase + Math.PI * (0.88 + (this._style % 0.2)));
+          this._legL.rotation.x += (sw * swing - this._legL.rotation.x) * 0.55;
+          this._legR.rotation.x += (sw2 * swing * (0.82 + this._limp * 0.16) - this._legR.rotation.x) * 0.55;
+          this._legL.rotation.z = Math.sin(this._phase * 0.5 + this._style) * 0.08;
+          this._legR.rotation.z = -Math.sin(this._phase * 0.47 + this._style) * 0.07;
+
+          const lean = this._fastGait ? 0.34 : this.isThrower ? -0.03 : this.isCaballito ? 0.10 : 0.16;
+          const torsoX = lean + bitePulse * 0.45 + Math.max(0, sw) * 0.05;
+          const torsoZ = Math.sin(this._phase * 0.5 + this._style) * (this._fastGait ? 0.12 : 0.08);
+          this._blendRotation(this._torso, torsoX, torsoZ, 0.30);
+          this._blendRotation(
+            this._head,
+            -0.10 + bitePulse * 0.25 + Math.sin(this._phase * 0.8) * 0.06,
+            Math.sin(this._phase * 0.72 + this._style) * (this._fastGait ? 0.20 : 0.14),
+            0.25,
+          );
           this.group.position.y = Math.abs(Math.sin(this._phase)) * bobAmt;
-          // Settle arms back to the outstretched zombie pose after a dance
-          if (this._armL) { this._armL.rotation.x += (-0.55 - this._armL.rotation.x) * 0.18; this._armL.rotation.z *= 0.8; }
-          if (this._armR) { this._armR.rotation.x += (-0.55 - this._armR.rotation.x) * 0.18; this._armR.rotation.z *= 0.8; }
+
+          const reach = this._fastGait ? 1.45 : this.isThrower ? 0.86 : 1.12;
+          this._poseArms(
+            -reach - Math.max(0, -sw) * 0.36 + bitePulse * -0.25,
+            -reach - Math.max(0,  sw) * 0.36 + bitePulse * -0.25,
+             0.24 + Math.sin(this._phase * 0.7 + this._style) * 0.13,
+            -0.24 - Math.sin(this._phase * 0.73 + this._style) * 0.13,
+            0.28,
+          );
         }
       } else {
         // Throwing stance — gentle sway, legs settling
         this._phase += dt * 3;
         this._legL.rotation.x *= 0.85;
         this._legR.rotation.x *= 0.85;
-        this._torso.rotation.z = Math.sin(this._phase) * 0.05;
+        this._blendRotation(this._torso, 0.04 + bitePulse * 0.35, Math.sin(this._phase) * 0.10, 0.32);
+        this._blendRotation(this._head, bitePulse * 0.25, Math.sin(this._phase + this._style) * 0.16, 0.30);
+        this._poseArms(-1.35 - bitePulse * 0.35, -0.72 + bitePulse * 0.10, 0.34, -0.18, 0.30);
         this.group.position.y = Math.abs(Math.sin(this._phase)) * 0.04;
       }
     } else {
       this._phase += dt * 1.2;
-      this._torso.rotation.z = Math.sin(this._phase) * 0.04;
+      this._blendRotation(this._torso, 0.04, Math.sin(this._phase + this._style) * 0.04, 0.10);
+      this._blendRotation(this._head, Math.sin(this._phase * 0.6) * 0.04, Math.sin(this._phase * 0.8 + this._style) * 0.08, 0.10);
+      this._poseArms(-0.95, -0.95, 0.20, -0.20, 0.12);
+      this.group.position.y = Math.abs(Math.sin(this._phase)) * 0.025;
     }
 
     return { hitTarget };
