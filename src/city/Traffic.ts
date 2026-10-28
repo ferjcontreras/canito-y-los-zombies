@@ -4,12 +4,12 @@ import type { AABB } from '../entities/Canito';
 import type { TrafficLights } from './TrafficLights';
 
 // Autos y motos que circulan por las calles (carril derecho). Frenan y tocan
-// bocina ante peatones / Canito / el tranvía, son colliders sólidos (Canito no
+// bocina ante Canito / el tranvía, son colliders sólidos (Canito no
 // los atraviesa) y no circulan por las vías del metrotranvía.
 // Geometría: frente hacia +Z (coincide con el heading del PathAgent).
 
 // Obstáculo dinámico ante el que un vehículo frena. `honk` = si amerita bocina
-// (peatones y Canito sí; el tranvía no).
+// (Canito sí; el tranvía no).
 export interface Obstacle { x: number; z: number; r: number; honk: boolean; }
 
 const _matCache = new Map<number, THREE.MeshLambertMaterial>();

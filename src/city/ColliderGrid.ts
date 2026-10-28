@@ -1,12 +1,12 @@
 // Índice espacial de colliders.
 //
 // El microcentro genera ~9.000 AABBs estáticos (edificios, casas de relleno,
-// árboles, muros). Probarlos TODOS por cada zombie y cada civil, en cada frame,
+// árboles, muros). Probarlos TODOS por cada zombie, en cada frame,
 // eran millones de comparaciones por frame: el mayor costo de CPU del juego.
 //
 // Acá los estáticos se reparten en celdas de `cell` metros y una consulta sólo
 // mira las celdas que toca (decenas de candidatos en vez de miles). Los
-// colliders que SE MUEVEN (autos del tránsito, el bus, los civiles) no se
+// colliders que SE MUEVEN (autos del tránsito, el bus) no se
 // pueden indexar: van en capas aparte que se recorren enteras — son pocos.
 import type { AABB } from '../entities/Canito';
 

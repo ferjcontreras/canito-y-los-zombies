@@ -52,7 +52,6 @@ export class ZombieGaucho {
     isBoss;
     isQueen;
     isCaballito;
-    grabbing = false; // está sosteniendo a un civil (queda quieto)
     _dancingNow = false; // ¿está en su baile ahora mismo? (walkers)
     _aggro = false; // ¿ya está persiguiendo?
     /** Despierta al zombie (emboscadas, o cuando Canito mata a uno cerca). */

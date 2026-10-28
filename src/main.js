@@ -384,7 +384,7 @@ async function main() {
     const parkedCars = buildParkedCars(engine.scene, streets, nodeMap, proj, colliders, onTramCorridor);
     // ── Índice espacial de colisiones ────────────────────────────────────────
     // A esta altura ya está toda la escenografía: ~9.000 AABBs. Recorrerlos
-    // enteros por cada zombie, civil y auto zombi, en cada frame, eran millones
+    // enteros por cada zombie y auto zombi, en cada frame, eran millones
     // de comparaciones. El grid los reparte en celdas y devuelve sólo los
     // vecinos. El bus se mueve, así que va como capa dinámica, no indexado.
     const worldGrid = new ColliderGrid(16);
