@@ -1079,6 +1079,8 @@ async function main(): Promise<void> {
     // Recién se puede ganar una vez que aparecieron (emboscada) y ambos cayeron
     if (caballitos.length < 2 || caballitos.some(c => c.alive)) return;
     victory = true;
+    music.stopSong();
+    music.playFanfare(true);      // fanfarria larga de victoria final
     victoryStats.textContent = `¡Venciste a los Caballitos de Marly! Gauchos kabum: ${killCount}`;
     victoryEl.classList.remove('hidden');
   };
@@ -1149,6 +1151,8 @@ async function main(): Promise<void> {
         outroCart = null;
       }
       sound.boom();
+      music.stopSong();
+      music.playFanfare();
       flashBanner('🏆 ¡NIVEL 1 SUPERADO!', '#ffd24a');
       // Un respiro para ver el humo, y después la carátula: "superado" con el
       // balance y "NIVEL 2" (como al pasar de mundo en Mario). Detrás del negro
@@ -1160,7 +1164,11 @@ async function main(): Promise<void> {
           { title: 'NIVEL 2', color: '#ffd24a', subtitle: '¡A los Portones del Parque!' },
         ], {
           onBlack: setupLevel2,
-          onReveal: () => { transitioning = false; invuln = 2.5; },
+          onReveal: () => {
+            transitioning = false;
+            invuln = 2.5;
+            music.restartSong();      // el Nivel 2 arranca con la canción desde el principio
+          },
         });
       }, 1600);
     }

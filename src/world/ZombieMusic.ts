@@ -209,6 +209,55 @@ export class ZombieMusic {
     });
   }
 
+  /** Fanfarria de festejo: trompetas que suben y terminan en una nota larga
+   *  sobre un acorde de Do mayor. `final` = versión larga (victoria final),
+   *  que sigue subiendo hasta el Do agudo. ~2 s / ~3 s */
+  playFanfare(final = false): void {
+    if (!this.ctx) return;
+    const beat = 0.16;
+    // [frecuencia, duración en beats]: Sol Do Mi Sol– Mi Sol———
+    const phrase: Array<[number, number]> = final
+      ? [[392.0, 1], [523.25, 1], [659.25, 1], [783.99, 2], [659.25, 1],
+         [783.99, 1], [880.0, 1], [987.77, 1], [1046.5, 10]]
+      : [[392.0, 1], [523.25, 1], [659.25, 1], [783.99, 2], [659.25, 1], [783.99, 6]];
+    let t = this.ctx.currentTime + 0.05;
+    for (const [f, b] of phrase) {
+      this._brass(t, f, b * beat, 0.2);
+      t += b * beat;
+    }
+    // Acorde de sostén (Do mayor) bajo la última nota
+    const lastDur = phrase[phrase.length - 1][1] * beat;
+    for (const f of [130.81, 261.63, 329.63, 392.0]) this._brass(t - lastDur, f, lastDur, 0.07);
+  }
+
+  /** Una nota de "trompeta": dos sierras levemente desafinadas con un filtro
+   *  que se abre de golpe (el "ataque" del bronce) y vibrato en las largas. */
+  private _brass(t: number, freq: number, dur: number, level: number): void {
+    const ctx = this.ctx!;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 1.5;
+    lp.frequency.setValueAtTime(500, t);
+    lp.frequency.linearRampToValueAtTime(3200, t + 0.05);
+    lp.frequency.setTargetAtTime(1800, t + 0.08, 0.15);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(level, t + 0.02);
+    g.gain.setValueAtTime(level, t + Math.max(0.04, dur * 0.85));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.12);
+    lp.connect(g).connect(this.musicGain);
+    for (const det of [-6, 6]) {
+      const o = ctx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.value = freq; o.detune.value = det;
+      if (dur > 0.5) {
+        const lfo = ctx.createOscillator(); lfo.frequency.value = 5;
+        const lg = ctx.createGain(); lg.gain.value = freq * 0.006;
+        lfo.connect(lg).connect(o.frequency);
+        lfo.start(t + 0.25); lfo.stop(t + dur + 0.15);
+      }
+      o.connect(lp);
+      o.start(t); o.stop(t + dur + 0.15);
+    }
+  }
+
   setEnabled(on: boolean): void {
     this.enabled = on;
     if (this.ctx) this.musicGain.gain.setTargetAtTime(on ? 0.5 : 0.0, this.ctx.currentTime, 0.2);
