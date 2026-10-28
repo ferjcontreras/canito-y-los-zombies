@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { AABB } from './Canito';
+import type { ColliderGrid } from '../city/ColliderGrid';
 
 const MAT_CHASSIS = new THREE.MeshLambertMaterial({ color: 0x282828, flatShading: true });
 const MAT_CABIN   = new THREE.MeshLambertMaterial({ color: 0x1f1f1f, flatShading: true });
@@ -80,15 +81,18 @@ export class GauchoCar {
   get alive(): boolean          { return this._hp > 0; }
   takeDamage(d: number): void   { this._hp = Math.max(0, this._hp - d); }
 
-  private _collides(x: number, z: number, colliders: AABB[]): boolean {
+  // Candidatos del paso actual (los trae el índice espacial una sola vez).
+  private static readonly _cand: AABB[] = [];
+
+  private _collides(x: number, z: number, cand: readonly AABB[]): boolean {
     const r = GauchoCar.COLLIDER_R;
-    for (const c of colliders) {
+    for (const c of cand) {
       if (x + r > c.minX && x - r < c.maxX && z + r > c.minZ && z - r < c.maxZ) return true;
     }
     return false;
   }
 
-  update(dt: number, target: THREE.Vector3, colliders: AABB[] = []): { hitTarget: boolean; blocked: boolean } {
+  update(dt: number, target: THREE.Vector3, grid?: ColliderGrid): { hitTarget: boolean; blocked: boolean } {
     if (!this.alive) return { hitTarget: false, blocked: false };
     this._attackCooldown -= dt;
 
@@ -123,12 +127,16 @@ export class GauchoCar {
       const nx = px + stepX;
       const nz = pz + stepZ;
 
-      if (!this._collides(nx, nz, colliders)) {
+      const cand = GauchoCar._cand;
+      if (grid) grid.near(px, pz, Math.hypot(stepX, stepZ) + GauchoCar.COLLIDER_R + 0.5, cand);
+      else cand.length = 0;
+
+      if (!this._collides(nx, nz, cand)) {
         this.position.x = nx;
         this.position.z = nz;
-      } else if (!this._collides(nx, pz, colliders)) {
+      } else if (!this._collides(nx, pz, cand)) {
         this.position.x = nx;
-      } else if (!this._collides(px, nz, colliders)) {
+      } else if (!this._collides(px, nz, cand)) {
         this.position.z = nz;
       } else {
         blocked = true;

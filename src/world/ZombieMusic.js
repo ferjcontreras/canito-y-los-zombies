@@ -35,6 +35,9 @@ export class ZombieMusic {
     ctx = null;
     master;
     musicGain; // master de música (toggle con M)
+    songGain; // la canción (procedural o pista): se corta al perder
+    trackBuf = null;
+    trackSrc = null;
     synthBus; // mezcla de la música procedural
     trackGain; // pista real (si existe music.mp3)
     trackLP;
@@ -71,17 +74,22 @@ export class ZombieMusic {
         this.musicGain = ctx.createGain();
         this.musicGain.gain.value = this.enabled ? 0.5 : 0.0;
         this.musicGain.connect(this.master);
-        // Dos buses bajo el master de música: el sintetizado y la pista real.
+        // La canción va por su propio gain, así se puede cortar al perder una vida
+        // sin tocar el toggle de la M (la melodía de "perdiste" va directo a música).
+        this.songGain = ctx.createGain();
+        this.songGain.gain.value = 1;
+        this.songGain.connect(this.musicGain);
+        // Dos buses bajo la canción: el sintetizado y la pista real.
         this.synthBus = ctx.createGain();
         this.synthBus.gain.value = 0.68; // mezcla procedural
-        this.synthBus.connect(this.musicGain);
+        this.synthBus.connect(this.songGain);
         // Pista real (music.mp3) → filtro que se abre en combate → master de música
         this.trackLP = ctx.createBiquadFilter();
         this.trackLP.type = 'lowpass';
         this.trackLP.frequency.value = 1600;
         this.trackGain = ctx.createGain();
         this.trackGain.gain.value = 0.0; // sube si carga el archivo
-        this.trackLP.connect(this.trackGain).connect(this.musicGain);
+        this.trackLP.connect(this.trackGain).connect(this.songGain);
         // eco para los leads de tensión
         this.delay = ctx.createDelay(0.6);
         this.delay.delayTime.value = 0.32;
@@ -112,18 +120,94 @@ export class ZombieMusic {
             const res = await fetch(this.trackUrl);
             if (!res.ok)
                 return;
-            const audio = await ctx.decodeAudioData(await res.arrayBuffer());
-            const src = ctx.createBufferSource();
-            src.buffer = audio;
-            src.loop = true;
-            src.connect(this.trackLP);
-            src.start();
+            this.trackBuf = await ctx.decodeAudioData(await res.arrayBuffer());
+            this._startTrack();
             this.trackLoaded = true;
             const now = ctx.currentTime;
             this.synthBus.gain.setTargetAtTime(0.0, now, 0.8); // baja lo procedural
             this.trackGain.gain.setTargetAtTime(1.0, now, 0.8); // sube la pista real
         }
         catch { /* sin archivo o no decodificable: queda la música procedural */ }
+    }
+    /** (Re)arranca la pista real desde el principio. */
+    _startTrack() {
+        if (!this.ctx || !this.trackBuf)
+            return;
+        this.trackSrc?.stop();
+        const src = this.ctx.createBufferSource();
+        src.buffer = this.trackBuf;
+        src.loop = true;
+        src.connect(this.trackLP);
+        src.start();
+        this.trackSrc = src;
+    }
+    /** Canito perdió una vida: la canción se corta con un fundido corto. */
+    stopSong() {
+        if (!this.ctx)
+            return;
+        this.playing = false;
+        const now = this.ctx.currentTime;
+        this.songGain.gain.cancelScheduledValues(now);
+        this.songGain.gain.setTargetAtTime(0, now, 0.12);
+    }
+    /** Vuelve a arrancar la canción desde el principio (al reaparecer). */
+    restartSong() {
+        if (!this.ctx)
+            return;
+        const now = this.ctx.currentTime;
+        this.step = 0;
+        this.bar = 0;
+        this.melIdx = 0;
+        this.nextTime = now + 0.1;
+        this.melTime = this.nextTime;
+        this.playing = true;
+        this._startTrack();
+        this.songGain.gain.cancelScheduledValues(now);
+        this.songGain.gain.setValueAtTime(0, now);
+        this.songGain.gain.linearRampToValueAtTime(1, now + 0.6);
+    }
+    /** Melodía de "perdiste": trombón triste que baja (wah, wah, wah, waaah). ~2.8 s */
+    playLose() {
+        if (!this.ctx)
+            return;
+        const ctx = this.ctx;
+        const notes = [196.0, 185.0, 174.61, 164.81]; // Sol3 → Fa#3 → Fa3 → Mi3
+        let t = ctx.currentTime + 0.05;
+        notes.forEach((f, i) => {
+            const last = i === notes.length - 1;
+            const dur = last ? 1.3 : 0.42;
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.value = f;
+            // "wah": el filtro se abre y se cierra en cada nota, como una sordina
+            const lp = ctx.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.Q.value = 4;
+            lp.frequency.setValueAtTime(300, t);
+            lp.frequency.linearRampToValueAtTime(1400, t + 0.12);
+            lp.frequency.linearRampToValueAtTime(400, t + dur);
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(0.35, t + 0.04);
+            g.gain.setValueAtTime(0.35, t + dur * 0.8);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+            if (last) {
+                // la última se estira temblando y cae un poquito
+                const lfo = ctx.createOscillator();
+                lfo.frequency.value = 5.5;
+                const lg = ctx.createGain();
+                lg.gain.value = 6;
+                lfo.connect(lg).connect(o.frequency);
+                lfo.start(t + 0.25);
+                lfo.stop(t + dur);
+                o.frequency.setValueAtTime(f, t + 0.6);
+                o.frequency.linearRampToValueAtTime(f * 0.94, t + dur);
+            }
+            o.connect(lp).connect(g).connect(this.musicGain);
+            o.start(t);
+            o.stop(t + dur + 0.05);
+            t += dur + 0.06;
+        });
     }
     setEnabled(on) {
         this.enabled = on;

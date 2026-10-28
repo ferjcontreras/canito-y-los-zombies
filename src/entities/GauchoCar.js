@@ -65,15 +65,17 @@ export class GauchoCar {
     get hp() { return this._hp; }
     get alive() { return this._hp > 0; }
     takeDamage(d) { this._hp = Math.max(0, this._hp - d); }
-    _collides(x, z, colliders) {
+    // Candidatos del paso actual (los trae el índice espacial una sola vez).
+    static _cand = [];
+    _collides(x, z, cand) {
         const r = GauchoCar.COLLIDER_R;
-        for (const c of colliders) {
+        for (const c of cand) {
             if (x + r > c.minX && x - r < c.maxX && z + r > c.minZ && z - r < c.maxZ)
                 return true;
         }
         return false;
     }
-    update(dt, target, colliders = []) {
+    update(dt, target, grid) {
         if (!this.alive)
             return { hitTarget: false, blocked: false };
         this._attackCooldown -= dt;
@@ -105,14 +107,19 @@ export class GauchoCar {
             const pz = this.position.z;
             const nx = px + stepX;
             const nz = pz + stepZ;
-            if (!this._collides(nx, nz, colliders)) {
+            const cand = GauchoCar._cand;
+            if (grid)
+                grid.near(px, pz, Math.hypot(stepX, stepZ) + GauchoCar.COLLIDER_R + 0.5, cand);
+            else
+                cand.length = 0;
+            if (!this._collides(nx, nz, cand)) {
                 this.position.x = nx;
                 this.position.z = nz;
             }
-            else if (!this._collides(nx, pz, colliders)) {
+            else if (!this._collides(nx, pz, cand)) {
                 this.position.x = nx;
             }
-            else if (!this._collides(px, nz, colliders)) {
+            else if (!this._collides(px, nz, cand)) {
                 this.position.z = nz;
             }
             else {

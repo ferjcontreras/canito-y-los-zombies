@@ -54,6 +54,11 @@ export class ZombieGaucho {
     isCaballito;
     grabbing = false; // está sosteniendo a un civil (queda quieto)
     _dancingNow = false; // ¿está en su baile ahora mismo? (walkers)
+    _aggro = false; // ¿ya está persiguiendo?
+    /** Despierta al zombie (emboscadas, o cuando Canito mata a uno cerca). */
+    alert() { this._aggro = true; }
+    /** Deja de perseguir (al reaparecer Canito tras perder una vida). */
+    calm() { this._aggro = false; }
     get isDancing() { return this._dancingNow; }
     _hp;
     _fastGait = false; // runner-style leg/bob animation
@@ -81,7 +86,12 @@ export class ZombieGaucho {
     static WALK_SPEED = 3.2;
     static RUN_SPEED = 18; // same as Canito sprint — they match pace, can't be outrun
     static THROWER_SPEED = 2.2; // throwers are heavy and slow
-    static DETECT_R = 150;
+    static DETECT_R = 150; // jefes, throwers y reinas
+    // Comunes y corredores: te "ven" recién de cerca y, una vez que te vieron, te
+    // siguen hasta que te alejás bastante. Así la horda se va despertando a medida
+    // que Canito avanza, en vez de venir toda junta desde la largada.
+    static NOTICE_R = 38;
+    static LOSE_R = 80;
     static ATTACK_R = 1.7;
     static DAMAGE_INTERVAL = 1.4;
     static HIT_RADIUS = 1.4;
@@ -389,9 +399,12 @@ export class ZombieGaucho {
     get hp() { return this._hp; }
     get alive() { return this._hp > 0; }
     takeDamage(d) { this._hp = Math.max(0, this._hp - d); }
-    _collides(x, z, colliders) {
+    // Candidatos del frame: el grid los vuelca acá una sola vez por paso, y las
+    // tres pruebas de deslizamiento (XZ, X, Z) se hacen contra esa lista corta.
+    static _cand = [];
+    _collides(x, z, cand) {
         const r = ZombieGaucho.COLLIDER_R;
-        for (const c of colliders) {
+        for (const c of cand) {
             if (x + r > c.minX && x - r < c.maxX && z + r > c.minZ && z - r < c.maxZ)
                 return true;
         }
@@ -549,7 +562,7 @@ export class ZombieGaucho {
         this._poseArms(-0.95 - arc * 1.45, -0.95 - arc * 1.7, 0.55 * arc, -0.55 * arc, 0.65);
         this._blendRotation(this._head, -0.35 * arc, Math.sin((1 - t) * Math.PI * 5) * 0.25, 0.55);
     }
-    update(dt, target, colliders = []) {
+    update(dt, target, grid) {
         if (!this.alive)
             return { hitTarget: false };
         this._attackCooldown -= dt;
@@ -565,6 +578,16 @@ export class ZombieGaucho {
         const dz = target.z - this.group.position.z;
         const dist = Math.hypot(dx, dz);
         let hitTarget = false;
+        if (this.isThrower || this.isQueen || this.isCaballito || this.isBoss) {
+            this._aggro = dist < ZombieGaucho.DETECT_R;
+        }
+        else if (this._aggro) {
+            if (dist > ZombieGaucho.LOSE_R)
+                this._aggro = false;
+        }
+        else if (dist < ZombieGaucho.NOTICE_R) {
+            this._aggro = true;
+        }
         if (!this.isQueen && dist < ZombieGaucho.ATTACK_R) {
             // In melee — face target, idle bite (queens never bite; they throw grapes)
             this.group.rotation.y = Math.atan2(dx, dz);
@@ -582,7 +605,7 @@ export class ZombieGaucho {
             this._legR.rotation.x *= 0.88;
             this.group.position.y = Math.abs(Math.sin(this._phase * 2)) * 0.035;
         }
-        else if (dist < ZombieGaucho.DETECT_R) {
+        else if (this._aggro) {
             const invDist = dist > 0.001 ? 1 / dist : 0;
             const ux = dx * invDist, uz = dz * invDist;
             this.group.rotation.y = Math.atan2(ux, uz);
@@ -630,14 +653,19 @@ export class ZombieGaucho {
                 const pz = this.group.position.z;
                 const nx = px + stepX;
                 const nz = pz + stepZ;
-                if (!this._collides(nx, nz, colliders)) {
+                const cand = ZombieGaucho._cand;
+                if (grid)
+                    grid.near(px, pz, Math.hypot(stepX, stepZ) + ZombieGaucho.COLLIDER_R + 0.5, cand);
+                else
+                    cand.length = 0;
+                if (!this._collides(nx, nz, cand)) {
                     this.group.position.x = nx;
                     this.group.position.z = nz;
                 }
-                else if (!this._collides(nx, pz, colliders)) {
+                else if (!this._collides(nx, pz, cand)) {
                     this.group.position.x = nx; // slide along X
                 }
-                else if (!this._collides(px, nz, colliders)) {
+                else if (!this._collides(px, nz, cand)) {
                     this.group.position.z = nz; // slide along Z
                 }
                 // else: stuck against a wall — animation still plays in place

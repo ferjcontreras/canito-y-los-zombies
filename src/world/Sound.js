@@ -188,6 +188,30 @@ export class SoundManager {
         src.connect(filter).connect(gain).connect(this.master());
         src.start(now);
     }
+    /** Chisporroteo corto: un mate o una empanada evaporándose en la llamarada. */
+    sizzle() {
+        if (this.throttle('sizzle', 0.06))
+            return;
+        const ctx = this.getCtx();
+        const now = ctx.currentTime;
+        const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.22), ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) {
+            const t = i / data.length;
+            data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.5);
+        }
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.setValueAtTime(2600, now);
+        filter.frequency.exponentialRampToValueAtTime(900, now + 0.2);
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.32, now);
+        gain.gain.exponentialRampToValueAtTime(0.005, now + 0.22);
+        src.connect(filter).connect(gain).connect(this.master());
+        src.start(now);
+    }
     yelp() {
         if (this.throttle('yelp', 0.2))
             return;

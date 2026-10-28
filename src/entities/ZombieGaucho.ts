@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { AABB } from './Canito';
+import type { ColliderGrid } from '../city/ColliderGrid';
 import type { SnackKind } from './GauchoSnack';
 
 // ── Shared materials (one set across all zombies) ─────────────────────────
@@ -58,6 +59,11 @@ export class ZombieGaucho {
   readonly isCaballito: boolean;
   grabbing = false;          // está sosteniendo a un civil (queda quieto)
   private _dancingNow = false;   // ¿está en su baile ahora mismo? (walkers)
+  private _aggro = false;        // ¿ya está persiguiendo?
+  /** Despierta al zombie (emboscadas, o cuando Canito mata a uno cerca). */
+  alert(): void { this._aggro = true; }
+  /** Deja de perseguir (al reaparecer Canito tras perder una vida). */
+  calm(): void { this._aggro = false; }
   get isDancing(): boolean { return this._dancingNow; }
   private _hp: number;
   private _fastGait = false;        // runner-style leg/bob animation
@@ -87,7 +93,12 @@ export class ZombieGaucho {
   static readonly WALK_SPEED       = 3.2;
   static readonly RUN_SPEED        = 18;   // same as Canito sprint — they match pace, can't be outrun
   static readonly THROWER_SPEED    = 2.2;  // throwers are heavy and slow
-  static readonly DETECT_R         = 150;
+  static readonly DETECT_R         = 150;  // jefes, throwers y reinas
+  // Comunes y corredores: te "ven" recién de cerca y, una vez que te vieron, te
+  // siguen hasta que te alejás bastante. Así la horda se va despertando a medida
+  // que Canito avanza, en vez de venir toda junta desde la largada.
+  static readonly NOTICE_R         = 38;
+  static readonly LOSE_R           = 80;
   static readonly ATTACK_R         = 1.7;
   static readonly DAMAGE_INTERVAL  = 1.4;
   static readonly HIT_RADIUS       = 1.4;
@@ -409,9 +420,13 @@ export class ZombieGaucho {
 
   takeDamage(d: number): void { this._hp = Math.max(0, this._hp - d); }
 
-  private _collides(x: number, z: number, colliders: AABB[]): boolean {
+  // Candidatos del frame: el grid los vuelca acá una sola vez por paso, y las
+  // tres pruebas de deslizamiento (XZ, X, Z) se hacen contra esa lista corta.
+  private static readonly _cand: AABB[] = [];
+
+  private _collides(x: number, z: number, cand: readonly AABB[]): boolean {
     const r = ZombieGaucho.COLLIDER_R;
-    for (const c of colliders) {
+    for (const c of cand) {
       if (x + r > c.minX && x - r < c.maxX && z + r > c.minZ && z - r < c.maxZ) return true;
     }
     return false;
@@ -577,7 +592,7 @@ export class ZombieGaucho {
     this._blendRotation(this._head, -0.35 * arc, Math.sin((1 - t) * Math.PI * 5) * 0.25, 0.55);
   }
 
-  update(dt: number, target: THREE.Vector3, colliders: AABB[] = []): { hitTarget: boolean } {
+  update(dt: number, target: THREE.Vector3, grid?: ColliderGrid): { hitTarget: boolean } {
     if (!this.alive) return { hitTarget: false };
 
     this._attackCooldown -= dt;
@@ -595,6 +610,14 @@ export class ZombieGaucho {
     const dist = Math.hypot(dx, dz);
 
     let hitTarget = false;
+
+    if (this.isThrower || this.isQueen || this.isCaballito || this.isBoss) {
+      this._aggro = dist < ZombieGaucho.DETECT_R;
+    } else if (this._aggro) {
+      if (dist > ZombieGaucho.LOSE_R) this._aggro = false;
+    } else if (dist < ZombieGaucho.NOTICE_R) {
+      this._aggro = true;
+    }
 
     if (!this.isQueen && dist < ZombieGaucho.ATTACK_R) {
       // In melee — face target, idle bite (queens never bite; they throw grapes)
@@ -618,7 +641,7 @@ export class ZombieGaucho {
       this._legL.rotation.x *= 0.88;
       this._legR.rotation.x *= 0.88;
       this.group.position.y = Math.abs(Math.sin(this._phase * 2)) * 0.035;
-    } else if (dist < ZombieGaucho.DETECT_R) {
+    } else if (this._aggro) {
       const invDist = dist > 0.001 ? 1 / dist : 0;
       const ux = dx * invDist, uz = dz * invDist;
       this.group.rotation.y = Math.atan2(ux, uz);
@@ -659,12 +682,16 @@ export class ZombieGaucho {
         const nx = px + stepX;
         const nz = pz + stepZ;
 
-        if (!this._collides(nx, nz, colliders)) {
+        const cand = ZombieGaucho._cand;
+        if (grid) grid.near(px, pz, Math.hypot(stepX, stepZ) + ZombieGaucho.COLLIDER_R + 0.5, cand);
+        else cand.length = 0;
+
+        if (!this._collides(nx, nz, cand)) {
           this.group.position.x = nx;
           this.group.position.z = nz;
-        } else if (!this._collides(nx, pz, colliders)) {
+        } else if (!this._collides(nx, pz, cand)) {
           this.group.position.x = nx;          // slide along X
-        } else if (!this._collides(px, nz, colliders)) {
+        } else if (!this._collides(px, nz, cand)) {
           this.group.position.z = nz;          // slide along Z
         }
         // else: stuck against a wall — animation still plays in place

@@ -11,20 +11,27 @@ const GEO_INNER = new THREE.SphereGeometry(0.42, 8, 6);
 
 export class Fireball {
   readonly group: THREE.Group;
+  readonly damage: number;       // daño a jefes / autos zombi (los comunes mueren igual)
   private _vel: THREE.Vector3;
   private _life: number;
   private _alive = true;
   private _hitSolid = false;     // overlapped a building/wall this frame
-  private _light: THREE.PointLight;
+  private _light: THREE.PointLight | null = null;
   private _inner: THREE.Mesh;
 
   static readonly SPEED   = 18;     // m/s — slow enough to see in flight
   static readonly RADIUS  = 0.75;
   static readonly LIFE    = 2.4;    // seconds before fizzle
 
-  constructor(origin: THREE.Vector3, dir: THREE.Vector3) {
+  /** `opts` permite variantes más chicas/rápidas (balas de la metralla y
+   *  perdigones de la escopeta). Sin luz propia: muchas PointLight a la vez
+   *  recompilan los shaders y tiran el framerate. */
+  constructor(origin: THREE.Vector3, dir: THREE.Vector3,
+              opts: { scale?: number; speed?: number; life?: number; light?: boolean; damage?: number } = {}) {
     this.group = new THREE.Group();
     this.group.position.copy(origin);
+    this.group.scale.setScalar(opts.scale ?? 1);
+    this.damage = opts.damage ?? 1;
 
     const outer = new THREE.Mesh(GEO_OUTER, MAT_OUTER);
     outer.renderOrder = 999;
@@ -33,11 +40,13 @@ export class Fireball {
     this._inner = new THREE.Mesh(GEO_INNER, MAT_INNER);
     this.group.add(this._inner);
 
-    this._light = new THREE.PointLight(0xff7020, 3, 14, 2);
-    this.group.add(this._light);
+    if (opts.light ?? true) {
+      this._light = new THREE.PointLight(0xff7020, 3, 14, 2);
+      this.group.add(this._light);
+    }
 
-    this._vel = dir.clone().multiplyScalar(Fireball.SPEED);
-    this._life = Fireball.LIFE;
+    this._vel = dir.clone().multiplyScalar(opts.speed ?? Fireball.SPEED);
+    this._life = opts.life ?? Fireball.LIFE;
   }
 
   get position(): THREE.Vector3 { return this.group.position; }
@@ -52,7 +61,7 @@ export class Fireball {
     // Flicker the inner core
     const f = 0.85 + Math.random() * 0.3;
     this._inner.scale.setScalar(f);
-    this._light.intensity = 2.5 + Math.random() * 1.0;
+    if (this._light) this._light.intensity = 2.5 + Math.random() * 1.0;
 
     // Flag overlap with buildings/scenery — fireballs don't pass through walls.
     // We only flag here; main decides (a hit on a car/zombie takes priority over

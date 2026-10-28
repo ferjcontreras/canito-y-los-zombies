@@ -18,6 +18,8 @@ const NS_NAMES = {
     [300]: '9 de Julio', [400]: 'Av. San Martín', [500]: 'San Juan', [600]: 'Rioja',
     [700]: 'Salta',
 };
+/** Nombre de la calle N-S que cruza en `x` (múltiplos de 100), si tiene. */
+export const crossStreetName = (x) => NS_NAMES[x];
 // Las calles E-O cambian de nombre al cruzar Av. San Martín (x=400) y de nuevo
 // al cruzar Belgrano (x=-400). Tres tramos: Este (Salta↔San Martín), Medio
 // (San Martín↔Belgrano) y Oeste (Belgrano↔Parque).

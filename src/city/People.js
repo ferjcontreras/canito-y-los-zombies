@@ -8,52 +8,72 @@ const PANTS = [0x303a45, 0x4a3a2a, 0x5a5a60, 0x25303a, 0x6a5a3a, 0x2a3a30];
 const HAIR = [0x201810, 0x3a2a18, 0x100c08, 0x5a4630, 0x806040];
 const pick = (a) => a[(Math.random() * a.length) | 0];
 const mat = (c) => new THREE.MeshLambertMaterial({ color: c, flatShading: true });
+// ── Recursos COMPARTIDOS ────────────────────────────────────────────────────
+// La ciudad tiene ~130 personas a la vez. Si cada una creara sus materiales y
+// geometrías, serían miles de buffers y materiales distintos (nada se agrupa y
+// la memoria de GPU se dispara). Acá hay una paleta fija de materiales y un
+// único juego de cajas: todas las personas comparten las mismas referencias y
+// sólo se diferencian por qué material les toca.
+const SKIN_MATS = SKIN.map(mat);
+const SHIRT_MATS = SHIRT.map(mat);
+const PANTS_MATS = PANTS.map(mat);
+const HAIR_MATS = HAIR.map(mat);
+const SHOE_MAT = mat(0x23201c);
+const G_TORSO = new THREE.BoxGeometry(0.46, 0.62, 0.26);
+const G_HIPS = new THREE.BoxGeometry(0.44, 0.22, 0.26);
+const G_HEAD = new THREE.BoxGeometry(0.3, 0.32, 0.3);
+const G_HAIR = new THREE.BoxGeometry(0.33, 0.14, 0.33);
+// Los miembros cuelgan de su pivote: la geometría ya viene desplazada para que
+// el pivote quede en la articulación (cadera, rodilla, hombro, codo).
+const G_THIGH = new THREE.BoxGeometry(0.17, 0.36, 0.2);
+G_THIGH.translate(0, -0.18, 0);
+const G_SHIN = new THREE.BoxGeometry(0.15, 0.36, 0.18);
+G_SHIN.translate(0, -0.18, 0);
+const G_SHOE = new THREE.BoxGeometry(0.17, 0.1, 0.30);
+G_SHOE.translate(0, 0.05, 0.05);
+const G_UARM = new THREE.BoxGeometry(0.13, 0.30, 0.15);
+G_UARM.translate(0, -0.15, 0);
+const G_FARM = new THREE.BoxGeometry(0.115, 0.28, 0.13);
+G_FARM.translate(0, -0.14, 0);
 /** A walking person. `scale` < 1 makes a child. Forward is +Z.
  *  Limbs are jointed (hip→knee, shoulder→elbow) so the walk reads fluid,
  *  not like stiff planks swinging from the hip. */
 export function buildPerson(scale = 1) {
     const g = new THREE.Group();
-    const skin = mat(pick(SKIN));
-    const shirt = mat(pick(SHIRT));
-    const pants = mat(pick(PANTS));
-    const hair = mat(pick(HAIR));
-    const shoe = mat(0x23201c);
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.62, 0.26), shirt);
+    const skin = pick(SKIN_MATS);
+    const shirt = pick(SHIRT_MATS);
+    const pants = pick(PANTS_MATS);
+    const hair = pick(HAIR_MATS);
+    const torso = new THREE.Mesh(G_TORSO, shirt);
     torso.position.y = 1.12;
     torso.castShadow = true;
     g.add(torso);
     // hips
-    const hips = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.22, 0.26), pants);
+    const hips = new THREE.Mesh(G_HIPS, pants);
     hips.position.y = 0.78;
     g.add(hips);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.32, 0.3), skin);
+    const head = new THREE.Mesh(G_HEAD, skin);
     head.position.y = 1.62;
     head.castShadow = true;
     g.add(head);
     // Hair rides the head so it follows the head's turn.
-    const hairTop = new THREE.Mesh(new THREE.BoxGeometry(0.33, 0.14, 0.33), hair);
+    const hairTop = new THREE.Mesh(G_HAIR, hair);
     hairTop.position.y = 0.14;
     head.add(hairTop);
     // ── Legs: thigh from the hip, shin from a knee pivot, plus a shoe ─────────
-    const thighGeo = new THREE.BoxGeometry(0.17, 0.36, 0.2);
-    thighGeo.translate(0, -0.18, 0);
-    const shinGeo = new THREE.BoxGeometry(0.15, 0.36, 0.18);
-    shinGeo.translate(0, -0.18, 0);
-    const shoeGeo = new THREE.BoxGeometry(0.17, 0.1, 0.30);
-    shoeGeo.translate(0, 0.05, 0.05);
     const mkLeg = (sx) => {
         const hip = new THREE.Group();
         hip.position.set(sx * 0.12, 0.72, 0);
-        const thigh = new THREE.Mesh(thighGeo, pants);
+        const thigh = new THREE.Mesh(G_THIGH, pants);
         thigh.castShadow = true;
         hip.add(thigh);
         const knee = new THREE.Group();
         knee.position.y = -0.36;
         hip.add(knee);
-        const shin = new THREE.Mesh(shinGeo, pants);
+        const shin = new THREE.Mesh(G_SHIN, pants);
         shin.castShadow = true;
         knee.add(shin);
-        const sh = new THREE.Mesh(shoeGeo, shoe);
+        const sh = new THREE.Mesh(G_SHOE, SHOE_MAT);
         sh.position.y = -0.36;
         knee.add(sh);
         g.add(hip);
@@ -61,21 +81,17 @@ export function buildPerson(scale = 1) {
     };
     const L = mkLeg(-1), R = mkLeg(1);
     // ── Arms: upper arm from the shoulder, forearm from an elbow pivot ────────
-    const uArmGeo = new THREE.BoxGeometry(0.13, 0.30, 0.15);
-    uArmGeo.translate(0, -0.15, 0);
-    const fArmGeo = new THREE.BoxGeometry(0.115, 0.28, 0.13);
-    fArmGeo.translate(0, -0.14, 0);
     const mkArm = (sx) => {
         const sh = new THREE.Group();
         sh.position.set(sx * 0.3, 1.4, 0);
         sh.rotation.z = sx * 0.07; // arms hang slightly out from the body
-        const up = new THREE.Mesh(uArmGeo, shirt);
+        const up = new THREE.Mesh(G_UARM, shirt);
         up.castShadow = true;
         sh.add(up);
         const el = new THREE.Group();
         el.position.y = -0.30;
         sh.add(el);
-        const fore = new THREE.Mesh(fArmGeo, skin);
+        const fore = new THREE.Mesh(G_FARM, skin);
         el.add(fore);
         g.add(sh);
         return { sh, el };
@@ -150,11 +166,25 @@ export function animateWalk(rig, gait, intensity = 1) {
     rig.elbowR.rotation.x = (0.25 + Math.max(0, arm) * 0.8) * intensity;
     // Two bobs per stride + slight forward lean, torso twist and head counter-turn.
     rig.group.position.y = Math.abs(Math.sin(gait)) * 0.05 * intensity;
+    rig.torso.position.y = 1.12;
     rig.torso.rotation.x = 0.05 * intensity;
     rig.torso.rotation.y = swing * 0.09 * intensity;
     rig.torso.rotation.z = Math.sin(gait * 2) * 0.035 * intensity;
     rig.head.rotation.y = -swing * 0.06 * intensity;
     rig.head.rotation.z = -Math.sin(gait * 2) * 0.025 * intensity;
+}
+/** Pose de reposo: brazos caídos y una respiración apenas perceptible, para
+ *  que una persona parada no quede congelada como un maniquí. */
+export function animateIdle(rig, t) {
+    const b = Math.sin(t * 1.6) * 0.02;
+    rig.legL.rotation.x = rig.legR.rotation.x = 0;
+    rig.kneeL.rotation.x = rig.kneeR.rotation.x = 0;
+    rig.armL.rotation.x = rig.armR.rotation.x = 0;
+    rig.elbowL.rotation.x = rig.elbowR.rotation.x = 0.12 + b;
+    rig.group.position.y = 0;
+    rig.torso.rotation.set(0, 0, 0);
+    rig.torso.position.y = 1.12 + b * 0.5;
+    rig.head.rotation.set(0, 0, 0);
 }
 export function animateDog(rig, gait) {
     const sw = Math.sin(gait) * 0.6;

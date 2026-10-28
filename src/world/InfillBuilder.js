@@ -66,6 +66,41 @@ class SpatialGrid {
         return false;
     }
 }
+// ── Troceado espacial de los merges ──────────────────────────────────────
+// Fusionar todas las paredes (o todos los vidrios) en UN mesh para toda la
+// ciudad ahorra draw calls pero mata el frustum culling: ese mesh siempre está
+// a la vista, así que la GPU procesa sus millones de triángulos aunque la
+// cámara mire a una sola cuadra. Cortándolo en celdas, sólo se dibujan las que
+// entran en pantalla.
+const CHUNK = 220; // metros
+const chunkOf = (x, z) => (Math.floor(x / CHUNK) + 512) * 1024 + (Math.floor(z / CHUNK) + 512);
+const bucketOf = (m, k) => {
+    let b = m.get(k);
+    if (!b) {
+        b = [];
+        m.set(k, b);
+    }
+    return b;
+};
+// Color al vértice: así paredes, techos y parapetos de un trozo — con sus
+// decenas de colores — entran en UN solo mesh con un solo material, en vez de
+// un mesh por color y por trozo. Se quita `uv` (ningún material usa textura)
+// para que todas las geometrías tengan los mismos atributos y se puedan fusionar.
+const MAT_SOLID = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+const _tintColor = new THREE.Color();
+function tint(g, hex) {
+    g.deleteAttribute('uv');
+    const n = g.attributes.position.count;
+    const c = _tintColor.setHex(hex);
+    const arr = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+        arr[i * 3] = c.r;
+        arr[i * 3 + 1] = c.g;
+        arr[i * 3 + 2] = c.b;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+    return g;
+}
 // ── House geometry helpers (rotation-aware) ──────────────────────────────
 function makeBox(cx, cz, w, d, h, yBase, ang) {
     // BoxGeometry centred at origin spanning w × h × d.
@@ -73,6 +108,17 @@ function makeBox(cx, cz, w, d, h, yBase, ang) {
     // Drop the bottom face (we won't see it) — leave it for simplicity.
     g.rotateY(ang);
     g.translate(cx, yBase + h / 2, cz);
+    return g;
+}
+// Ventana: un ÚNICO cuadrilátero pegado a la fachada. Antes era una caja
+// (12 triángulos) de la que sólo se ve una cara; con ~4.000 edificios de varios
+// pisos eso solo sumaba 5,5 M de triángulos por frame. Con el plano son 2.
+//   `faceYaw` orienta la cara hacia afuera en el marco local del edificio, y
+//   `ang` aplica después la rotación del edificio, igual que `makeBox`.
+function makeWindowQuad(wx, wz, w, h, yBase, faceYaw, ang) {
+    const g = new THREE.PlaneGeometry(w, h); // mira a +Z
+    g.rotateY(faceYaw + ang);
+    g.translate(wx, yBase + h / 2, wz);
     return g;
 }
 function makeGabledRoof(cx, cz, w, d, wallH, ang) {
@@ -154,11 +200,11 @@ export function buildInfillHouses(scene, streets, nodeMap, proj, existingCollide
     // Caller-supplied no-build zones (avenue corridor, plaza, etc.)
     for (const ab of extraNoBuild)
         grid.insert(ab);
-    const wallsByColor = new Map();
-    const roofsByColor = new Map();
-    const parapetByColor = new Map();
-    const glassGeos = [];
-    const litGeos = [];
+    // Un mesh por trozo de ciudad: paredes + techos + parapetos juntos (con color
+    // al vértice), y los vidrios aparte porque no proyectan sombra.
+    const solidByChunk = new Map();
+    const glassByChunk = new Map();
+    const litByChunk = new Map();
     const newColliders = [];
     // Window grids on the four façades, split into plain glass and a few lit ones.
     const addWindows = (cx, cz, ang, W, D, wallH, floors, litProb) => {
@@ -169,22 +215,22 @@ export function buildInfillHouses(scene, streets, nodeMap, proj, existingCollide
         const l2w = (lx, lz) => [cx + lx * c + lz * s, cz - lx * s + lz * c];
         const halfW = W / 2, halfD = D / 2;
         const faces = [
-            { alongX: true, perp: halfD, len: W },
-            { alongX: true, perp: -halfD, len: W },
-            { alongX: false, perp: halfW, len: D },
-            { alongX: false, perp: -halfW, len: D },
+            { alongX: true, perp: halfD, len: W, yaw: 0 },
+            { alongX: true, perp: -halfD, len: W, yaw: Math.PI },
+            { alongX: false, perp: halfW, len: D, yaw: Math.PI / 2 },
+            { alongX: false, perp: -halfW, len: D, yaw: -Math.PI / 2 },
         ];
         for (const f of faces) {
             const cols = Math.max(1, Math.floor(f.len / 2.6));
             const ww = (f.len / cols) * 0.55;
-            const pad = Math.sign(f.perp) * 0.06;
+            const pad = Math.sign(f.perp) * T; // apenas por delante del muro
             for (let fl = 0; fl < floors; fl++) {
                 const yb = fl * floorH + floorH * 0.24;
                 for (let ci = 0; ci < cols; ci++) {
                     const along = -f.len / 2 + (ci + 0.5) * (f.len / cols);
                     const [wx, wz] = f.alongX ? l2w(along, f.perp + pad) : l2w(f.perp + pad, along);
-                    const g = makeBox(wx, wz, f.alongX ? ww : T, f.alongX ? T : ww, wh, yb, ang);
-                    (Math.random() < litProb ? litGeos : glassGeos).push(g);
+                    const g = makeWindowQuad(wx, wz, ww, wh, yb, f.yaw, ang);
+                    bucketOf(Math.random() < litProb ? litByChunk : glassByChunk, chunkOf(cx, cz)).push(g);
                 }
             }
         }
@@ -309,41 +355,34 @@ export function buildInfillHouses(scene, streets, nodeMap, proj, existingCollide
                         if (grid.overlapsAABB(test))
                             return null;
                         // ── Walls ──────────────────────────────────────────────────────
-                        const wallGeo = makeBox(cx, cz, houseW, houseD, wallH, 0, ang);
-                        if (!wallsByColor.has(wallColor))
-                            wallsByColor.set(wallColor, []);
-                        wallsByColor.get(wallColor).push(wallGeo);
+                        const chunk = chunkOf(cx, cz);
+                        const solid = bucketOf(solidByChunk, chunk);
+                        solid.push(tint(makeBox(cx, cz, houseW, houseD, wallH, 0, ang), wallColor));
                         if (isHouse) {
                             const roofColor = ROOF_PAL[Math.floor(Math.random() * ROOF_PAL.length)];
-                            const roofGeo = makeGabledRoof(cx, cz, houseW, houseD, wallH, ang);
-                            if (!roofsByColor.has(roofColor))
-                                roofsByColor.set(roofColor, []);
-                            roofsByColor.get(roofColor).push(roofGeo);
+                            solid.push(tint(makeGabledRoof(cx, cz, houseW, houseD, wallH, ang), roofColor));
                         }
                         else {
                             // Flat roof with parapet (4 thin box edges in local frame)
                             const pColor = PARAPET_PAL[Math.floor(Math.random() * PARAPET_PAL.length)];
-                            if (!parapetByColor.has(pColor))
-                                parapetByColor.set(pColor, []);
-                            const edges = parapetByColor.get(pColor);
                             const ph = 0.45, pw = 0.22;
                             const c = Math.cos(ang), s = Math.sin(ang);
                             const l2w = (lx, lz) => [cx + lx * c + lz * s, cz - lx * s + lz * c];
                             {
                                 const [wx, wz] = l2w(0, halfD);
-                                edges.push(makeBox(wx, wz, houseW + pw, pw, ph, wallH, ang));
+                                solid.push(tint(makeBox(wx, wz, houseW + pw, pw, ph, wallH, ang), pColor));
                             }
                             {
                                 const [wx, wz] = l2w(0, -halfD);
-                                edges.push(makeBox(wx, wz, houseW + pw, pw, ph, wallH, ang));
+                                solid.push(tint(makeBox(wx, wz, houseW + pw, pw, ph, wallH, ang), pColor));
                             }
                             {
                                 const [wx, wz] = l2w(halfW, 0);
-                                edges.push(makeBox(wx, wz, pw, houseD + pw, ph, wallH, ang));
+                                solid.push(tint(makeBox(wx, wz, pw, houseD + pw, ph, wallH, ang), pColor));
                             }
                             {
                                 const [wx, wz] = l2w(-halfW, 0);
-                                edges.push(makeBox(wx, wz, pw, houseD + pw, ph, wallH, ang));
+                                solid.push(tint(makeBox(wx, wz, pw, houseD + pw, ph, wallH, ang), pColor));
                             }
                         }
                         // ── Windows (grid of glass panes, a few lit at dusk) ───────────
@@ -367,37 +406,34 @@ export function buildInfillHouses(scene, streets, nodeMap, proj, existingCollide
             debt -= L;
         }
     }
-    // Commit meshes
-    const commit = (byColor, castShadow = true) => {
-        for (const [color, geos] of byColor) {
+    // Commit: un mesh de obra por trozo, más los vidrios.
+    for (const geos of solidByChunk.values()) {
+        if (!geos.length)
+            continue;
+        const merged = mergeGeometries(geos, false);
+        if (!merged)
+            continue;
+        const mesh = new THREE.Mesh(merged, MAT_SOLID);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+    }
+    // Windows: dark glass + a few warm-lit panes (no shadow — they're flush)
+    const commitFlat = (byChunk, mat) => {
+        for (const geos of byChunk.values()) {
             if (!geos.length)
                 continue;
             const merged = mergeGeometries(geos, false);
             if (!merged)
                 continue;
-            const mesh = new THREE.Mesh(merged, new THREE.MeshLambertMaterial({ color, flatShading: true }));
-            mesh.castShadow = castShadow;
-            mesh.receiveShadow = true;
+            const mesh = new THREE.Mesh(merged, mat);
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
             scene.add(mesh);
         }
     };
-    commit(wallsByColor);
-    commit(roofsByColor);
-    commit(parapetByColor);
-    // Windows: dark glass + a few warm-lit panes (no shadow — they're flush)
-    const commitFlat = (geos, mat) => {
-        if (!geos.length)
-            return;
-        const merged = mergeGeometries(geos, false);
-        if (!merged)
-            return;
-        const mesh = new THREE.Mesh(merged, mat);
-        mesh.castShadow = false;
-        mesh.receiveShadow = false;
-        scene.add(mesh);
-    };
-    commitFlat(glassGeos, new THREE.MeshLambertMaterial({ color: GLASS_COLOR, flatShading: true }));
-    commitFlat(litGeos, new THREE.MeshLambertMaterial({
+    commitFlat(glassByChunk, new THREE.MeshLambertMaterial({ color: GLASS_COLOR, flatShading: true }));
+    commitFlat(litByChunk, new THREE.MeshLambertMaterial({
         color: LIT_COLOR, emissive: 0xffb454, emissiveIntensity: 0.85, flatShading: true,
     }));
     if (typeof console !== 'undefined')

@@ -14,6 +14,7 @@ import { VendimiaCart }      from './entities/VendimiaCart';
 import { VendimiaThrow }     from './entities/VendimiaThrow';
 import { GauchoSnack }       from './entities/GauchoSnack';
 import { Bone }              from './entities/Bone';
+import { WeaponPickup, type WeaponKind } from './entities/WeaponPickup';
 import { Tram }              from './entities/Tram';
 import { CityBus }           from './entities/CityBus';
 import { EffectsManager }    from './world/Effects';
@@ -32,7 +33,7 @@ import { buildPortones, buildParkWall } from './world/LandmarkBuilder';
 import { buildPlazaIndependencia } from './world/PlazaIndependencia';
 import { buildTramLine }    from './world/TramBuilder';
 import { buildEnvironment } from './world/Environment';
-import { buildUrbanFixtures } from './world/UrbanFixtures';
+import { buildUrbanFixtures, crossStreetName } from './world/UrbanFixtures';
 import { buildPublicBuildings } from './world/PublicBuildings';
 import { createTreeGeos, scatterTreesInPolygon, addAvenueTree, scatterStreetTrees, commitTrees } from './world/TreeBuilder';
 import { buildStreetLampsAlongRoads, buildStreetLamps, buildBenches, buildBenchesAt } from './world/UrbanFurnitureBuilder';
@@ -40,8 +41,7 @@ import { LoadingOverlay }    from './ui/LoadingOverlay';
 import { upgradeToPBR }      from './world/pbr';
 import { CityGraph }         from './city/CityGraph';
 import { TrafficManager, type Obstacle } from './city/Traffic';
-import { CivilianManager }   from './city/Civilians';
-import { CharacterModel }    from './world/CharacterModel';
+import { ColliderGrid }      from './city/ColliderGrid';
 
 const CENTER    = { lat: -32.8895, lon: -68.8458 };
 
@@ -406,6 +406,15 @@ async function main(): Promise<void> {
   loading.setMessage('Estacionando autos…');
   const parkedCars = buildParkedCars(engine.scene, streets, nodeMap, proj, colliders, onTramCorridor);
 
+  // ── Índice espacial de colisiones ────────────────────────────────────────
+  // A esta altura ya está toda la escenografía: ~9.000 AABBs. Recorrerlos
+  // enteros por cada zombie, civil y auto zombi, en cada frame, eran millones
+  // de comparaciones. El grid los reparte en celdas y devuelve sólo los
+  // vecinos. El bus se mueve, así que va como capa dinámica, no indexado.
+  const worldGrid = new ColliderGrid(16);
+  worldGrid.addStatic(colliders.filter(c => c !== cityBus.collider));
+  worldGrid.addDynamic([cityBus.collider]);
+
   // ── Effects + sound ──────────────────────────────────────────────────────
   const effects = new EffectsManager(engine.scene);
   const sound   = new SoundManager();
@@ -455,12 +464,7 @@ async function main(): Promise<void> {
   const caballitos: ZombieGaucho[] = [];   // los dos jefes; el nivel termina al matarlos
 
   const RUNNER_PROB = 0.35;
-  const insideAnyCollider = (x: number, z: number, r = 0.5): boolean => {
-    for (const c of colliders) {
-      if (x + r > c.minX && x - r < c.maxX && z + r > c.minZ && z - r < c.maxZ) return true;
-    }
-    return false;
-  };
+  const insideAnyCollider = (x: number, z: number, r = 0.5): boolean => worldGrid.hits(x, z, r);
   const addZombie = (zx: number, zz: number, forceRunner = false, thrower = false, queen = false): boolean => {
     // No spawnear dentro del parque (al oeste del muro): sólo se entra por la puerta
     if (zx < PORTONES_X + 1) return false;
@@ -473,10 +477,11 @@ async function main(): Promise<void> {
     return true;
   };
 
-  // A trio of zombies near Canito's start — one is a runner for visibility.
-  addZombie(START_X - 35, START_Z + 1, true);   // forced runner
-  addZombie(START_X - 45, START_Z - 6);
-  addZombie(START_X - 55, START_Z + 8);
+  // Un trío de caminantes a la vista desde la largada, pero lejos (fuera del
+  // radio en que notan a Canito): el primer cruce lo decide el jugador.
+  addZombie(START_X - 80, START_Z + 1);
+  addZombie(START_X - 88, START_Z - 6);
+  addZombie(START_X - 96, START_Z + 8);
 
   // Horda concentrada a lo largo de la avenida que recorre Canito (largada →
   // Portones), NO dispersa por toda la ciudad. Una banda alrededor de la ruta
@@ -491,7 +496,7 @@ async function main(): Promise<void> {
       while (spawned < n && tries++ < n * 25) {
         const zx = xMin + Math.random() * (xMax - xMin);
         const zz = START_Z + (Math.random() - 0.5) * halfZ * 2;
-        if (Math.hypot(zx - START_X, zz - START_Z) < 55) continue;
+        if (Math.hypot(zx - START_X, zz - START_Z) < 75) continue;   // largada tranquila
         if (Math.hypot(zx, zz) < 150) continue;             // Plaza Independencia
         if (addZombie(zx, zz)) spawned++;
       }
@@ -573,6 +578,40 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── Premios que sueltan los autos/motos destruidos ─────────────────────────
+  // Cada auto en movimiento que Canito rompe suelta un huesito de vida o un
+  // arma (metralla / escopeta) con munición limitada; al agotarse vuelve a la
+  // bola de fuego de siempre.
+  const weaponPickups: WeaponPickup[] = [];
+  const WEAPONS: Record<WeaponKind, {
+    label: string; ammo: number; cooldown: number; pellets: number; spread: number;
+    scale: number; speed: number; life: number; damage: number;
+  }> = {
+    // Ráfaga continua manteniendo Espacio; leve dispersión para que "llueva".
+    metralla: { label: '💥 Metralla', ammo: 270, cooldown: 0.09, pellets: 1, spread: 0.07,
+                scale: 0.38, speed: 28, life: 1.5, damage: 0.35 },
+    // Abanico de perdigones que se abren; poco alcance (~15 m).
+    escopeta: { label: '🎯 Escopeta', ammo: 48, cooldown: 0.55, pellets: 7, spread: 0.55,
+                scale: 0.45, speed: 24, life: 0.65, damage: 0.4 },
+  };
+  let weapon: WeaponKind | null = null;   // null = bola de fuego normal
+  let ammo = 0;
+  const DROP_BONE_CHANCE = 0.5;
+
+  const dropPrize = (x: number, z: number) => {
+    if (Math.random() < DROP_BONE_CHANCE) {
+      const b = new Bone();
+      b.position.set(x, 0.5, z);
+      engine.scene.add(b.group);
+      bones.push(b);
+    } else {
+      const wp = new WeaponPickup(Math.random() < 0.5 ? 'metralla' : 'escopeta');
+      wp.position.set(x, 0.6, z);
+      engine.scene.add(wp.group);
+      weaponPickups.push(wp);
+    }
+  };
+
   // ── HUD ───────────────────────────────────────────────────────────────────
   const hudLat   = document.getElementById('hud-lat')!;
   const hudLon   = document.getElementById('hud-lon')!;
@@ -580,9 +619,11 @@ async function main(): Promise<void> {
   const hudHPFill = document.getElementById('hud-hp-fill') as HTMLDivElement;
   const hudPowerFill = document.getElementById('hud-power-fill') as HTMLDivElement;
   const hudKills = document.getElementById('hud-kills')!;
-  const hudSaved = document.getElementById('hud-saved')!;
+  const hudWeapon = document.getElementById('hud-weapon')!;
+  const renderWeapon = () => {
+    hudWeapon.textContent = weapon ? `${WEAPONS[weapon].label} ×${ammo}` : '🔥 Fuego';
+  };
   const hudLives = document.getElementById('hud-lives')!;
-  let savedCount = 0;
   const gameOverEl = document.getElementById('game-over')!;
   const victoryEl  = document.getElementById('victory')!;
   const victoryStats = document.getElementById('victory-stats')!;
@@ -611,50 +652,16 @@ async function main(): Promise<void> {
     return false;
   };
 
-  // Autos ambientales que circulan por las calles y frenan ante Canito/civiles.
+  // Autos ambientales que circulan por las calles y frenan ante Canito.
   const traffic = new TrafficManager(engine.scene, graph, 90, 30);
-
-  // Civiles que huyen de los zombies; al morderlos caen, convulsionan y se
-  // transforman en zombies nuevos. Se spawnean en MULTITUDES a lo largo del
-  // recorrido (este→Portones) y cerca del inicio, para que se vean enseguida.
-  const CIV_CLUSTERS: Array<[number, number]> = [
-    [650, 25], [640, -35], [560, 15], [470, -20], [340, 25],
-    [220, -30], [110, 20], [-30, -25], [-160, 25], [-300, -20],
-    [-460, 20], [-640, -15], [-150, 120], [120, -180], [-250, 240],
-    // repartidos por todo el microcentro (invasión reciente: gente por doquier)
-    [250, -250], [250, 250], [-250, -250], [0, 0], [400, 200],
-    [-400, 200], [400, -300], [-500, 300], [200, 350], [-200, -350],
-    [500, 100], [-700, 200], [350, -150], [-100, 300], [60, -300],
-  ];
-  const civilianSpawn = (): [number, number] => {
-    for (let t = 0; t < 30; t++) {
-      const [cx, cz] = CIV_CLUSTERS[(Math.random() * CIV_CLUSTERS.length) | 0];
-      const x = cx + (Math.random() - 0.5) * 46;
-      const z = cz + (Math.random() - 0.5) * 46;
-      if (!insideAnyCollider(x, z, 0.6)) return [x, z];
-    }
-    return [650 + (Math.random() - 0.5) * 20, 25 + (Math.random() - 0.5) * 20];
-  };
-  // Civiles: modelos low-poly CC0 (Quaternius) — casual + traje, para variedad.
-  // Con esqueleto pesan más que las cajas, así que bajamos la cantidad y se
-  // animan/dibujan sólo los cercanos (culling).
-  loading.setMessage('Cargando personajes…');
-  const civModels = [new CharacterModel(), new CharacterModel()];
-  await civModels[0].load('models/civ-casual.glb', 2.3);   // un toque más altos que los autos
-  await civModels[1].load('models/civ-suit.glb', 2.3);
-  const civilians = new CivilianManager(engine.scene, 130, civilianSpawn, civModels);
 
   // Autos sólidos: Canito y los zombies no los atraviesan.
   colliders.push(...traffic.colliders());
-  // Colliders del mundo + autos (SIN los civiles) — los civiles se mueven con
-  // estos para no trabarse entre ellos.
-  const worldColliders = colliders.slice();
-  // Civiles sólidos para Canito y los zombies (los pueden chocar / matar).
-  colliders.push(...civilians.colliders());
+  // El tránsito se mueve → capa dinámica del índice.
+  worldGrid.addDynamic(traffic.colliders());
 
   // Buffers reusados por frame para el tránsito
   const trafficObstacles: Obstacle[] = [];
-  const civBuf: { x: number; z: number }[] = [];
 
   // Pase PBR: convierte los materiales del mundo a MeshStandard para que
   // respondan al tone mapping ACES, la oclusión ambiental y el environment map.
@@ -666,6 +673,10 @@ async function main(): Promise<void> {
   loading.hide();
 
   // ── Game state ────────────────────────────────────────────────────────────
+  // Interceptar empanadas/mates con una bola de fuego (ver el bucle de disparos)
+  const SNACK_BURN_R = Fireball.RADIUS + GauchoSnack.RADIUS + 0.35;
+  const SNACK_BURN_Y = 2.0;
+
   const fireballs:  Fireball[]  = [];
   const thrownCars: ThrownCar[] = [];
   const grapeBunches: GrapeBunch[] = [];
@@ -683,10 +694,11 @@ async function main(): Promise<void> {
   const MAX_LIVES = 3;
   let lives  = MAX_LIVES;
   let invuln = 0;                 // segundos de invulnerabilidad tras revivir
-  let passedPlaza = false;        // ¿ya cruzó la Plaza Independencia?
-  // Punto de reaparición: arranca en la largada; pasa a la fuente de la plaza
-  // una vez que se cruza la Plaza Independencia.
+  // Punto de reaparición: arranca en la largada y avanza esquina por esquina
+  // (ver "Puntos de control" en el loop).
   const checkpoint = { x: START_X, z: START_Z };
+  let checkpointLine = START_X;   // x de la última transversal cruzada
+  const CROSS_STEP = 100;         // las transversales están cada 100 m
 
   const renderLives = () => { hudLives.textContent = '🐾'.repeat(lives) || '—'; };
   renderLives();
@@ -715,6 +727,22 @@ async function main(): Promise<void> {
     hudHPFill.className = 'hp-fill ' + cls;
   };
 
+  // Aviso chico arriba al centro (no tapa la acción como flashBanner).
+  const toast = (text: string) => {
+    const el = document.createElement('div');
+    el.textContent = text;
+    el.style.cssText = `
+      position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+      z-index: 120; pointer-events: none; opacity: 0; transition: opacity 0.3s;
+      font: 700 15px system-ui, sans-serif; color: #7eff8a;
+      background: rgba(13,17,23,0.82); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px; padding: 6px 14px;`;
+    document.body.appendChild(el);
+    requestAnimationFrame(() => { el.style.opacity = '1'; });
+    setTimeout(() => { el.style.opacity = '0'; }, 1800);
+    setTimeout(() => { el.remove(); }, 2200);
+  };
+
   const flashBanner = (text: string, color: string) => {
     const el = document.createElement('div');
     el.textContent = text;
@@ -730,57 +758,130 @@ async function main(): Promise<void> {
     setTimeout(() => { el.remove(); }, 2100);
   };
 
-  // Carátula de inicio de nivel (estilo intro de mundo de Mario Bros): fondo
-  // oscuro a pantalla completa con "NIVEL N", un subtítulo y las vidas de Canito.
-  // Aparece ~2.8 s y se desvanece. `onDone` corre al desaparecer.
-  const showLevelCard = (lvl: number, subtitle: string, onDone?: () => void) => {
+  // Carátula a pantalla completa (estilo intro de mundo de Mario Bros): fondo
+  // oscuro con un título, un subtítulo y las vidas de Canito. Puede tener
+  // varias páginas que se suceden (~2.4 s cada una) antes de desvanecerse.
+  // `onBlack` corre cuando ya tapa todo (para mover cosas sin que se vea),
+  // `onReveal` cuando empieza a desvanecerse y `onDone` al desaparecer.
+  type CardPage = { title: string; color: string; subtitle: string };
+  const CARD_PAGE_MS = 2400;
+  const showCard = (pages: CardPage[],
+                    hooks: { onBlack?: () => void; onReveal?: () => void; onDone?: () => void } = {}) => {
     const card = document.createElement('div');
     card.style.cssText = `
       position: fixed; inset: 0; z-index: 300; background: #0a0c11;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 20px; opacity: 0; transition: opacity 0.4s;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.4s;
       font-family: system-ui, sans-serif; text-align: center;`;
-    card.innerHTML = `
-      <div style="font-size:1.1rem;letter-spacing:0.4em;color:#8b93a7;">MENDOZA CITY</div>
-      <div style="font-size:4.6rem;font-weight:900;color:#ffd24a;
-                  text-shadow:0 0 26px rgba(255,210,74,0.5);letter-spacing:0.04em;">NIVEL ${lvl}</div>
-      <div style="font-size:1.5rem;color:#c9d1d9;">${subtitle}</div>
-      <div style="font-size:2.2rem;font-weight:800;color:#7eff8a;
-                  display:flex;align-items:center;gap:14px;margin-top:6px;">
-        <span style="font-size:2.6rem;">🐕</span> ✕ ${lives}
-      </div>`;
+    const body = document.createElement('div');
+    body.style.cssText = `display: flex; flex-direction: column; align-items: center; gap: 20px;
+      transition: opacity 0.25s;`;
+    const render = (pg: CardPage) => {
+      body.innerHTML = `
+        <div style="font-size:1.1rem;letter-spacing:0.4em;color:#8b93a7;">MENDOZA CITY</div>
+        <div style="font-size:4.6rem;font-weight:900;color:${pg.color};
+                    text-shadow:0 0 26px ${pg.color}80;letter-spacing:0.04em;">${pg.title}</div>
+        <div style="font-size:1.5rem;color:#c9d1d9;">${pg.subtitle}</div>
+        <div style="font-size:2.2rem;font-weight:800;color:#7eff8a;
+                    display:flex;align-items:center;gap:14px;margin-top:6px;">
+          <span style="font-size:2.6rem;">🐕</span> ✕ ${lives}
+        </div>`;
+    };
+    render(pages[0]);
+    card.appendChild(body);
     document.body.appendChild(card);
     requestAnimationFrame(() => { card.style.opacity = '1'; });
-    setTimeout(() => { card.style.opacity = '0'; }, 2800);
-    setTimeout(() => { card.remove(); onDone?.(); }, 3300);
+    setTimeout(() => { hooks.onBlack?.(); }, 450);
+    pages.slice(1).forEach((pg, i) => {
+      const at = 400 + (i + 1) * CARD_PAGE_MS;
+      setTimeout(() => { body.style.opacity = '0'; }, at - 250);
+      setTimeout(() => { render(pg); body.style.opacity = '1'; }, at);
+    });
+    const end = 400 + pages.length * CARD_PAGE_MS;
+    setTimeout(() => { card.style.opacity = '0'; hooks.onReveal?.(); }, end);
+    setTimeout(() => { card.remove(); hooks.onDone?.(); }, end + 500);
   };
+  const showLevelCard = (lvl: number, subtitle: string, onDone?: () => void) =>
+    showCard([{ title: `NIVEL ${lvl}`, color: '#ffd24a', subtitle }], { onDone });
 
+  // Reaparición en el checkpoint (corre con la carátula tapando la pantalla):
+  // zona despejada, proyectiles fuera y la horda "se olvida" de Canito, para
+  // que volver a jugar sea un arranque y no caer otra vez en el mismo lío.
+  const RESPAWN_CLEAR_R = 30;
   const respawn = () => {
     canitoHP = MAX_HP;
     renderHP();
-    invuln = 2.5;                 // i-frames + parpadeo al revivir
+    canito.group.rotation.z = 0;
     canito.group.position.set(checkpoint.x, 0, checkpoint.z);
     canito.setYRot(Math.atan2(PORTONES_X - checkpoint.x, PORTONES_Z - checkpoint.z));
-    flashBanner(`Te quedan ${lives} ${lives === 1 ? 'vida' : 'vidas'} 🐾`, '#7eff8a');
+    for (const z of zombies) {
+      if (!z.alive || z.isThrower || z.isQueen || z.isCaballito || z.isBoss) continue;
+      z.calm();
+      if (Math.hypot(z.position.x - checkpoint.x, z.position.z - checkpoint.z) < RESPAWN_CLEAR_R) {
+        z.takeDamage(z.hp);
+        z.remove(engine.scene);
+      }
+    }
+    for (const p of [...gauchoSnacks, ...spits, ...grapeBunches, ...vendimiaThrows, ...thrownCars]) p.kill();
+    powerCharge = 0;
   };
+
+  // ── Muerte: secuencia de "cierre" ──────────────────────────────────────────
+  // Al quedarse sin HP nada pasa de golpe: cámara lenta mientras Canito cae de
+  // costado y la pantalla se tiñe de rojo; después, fundido a negro con la
+  // carátula de vidas (o GAME OVER) y recién ahí reaparece.
+  const DEATH_FALL = 1.6;         // s (reales) de caída antes del fundido
+  const DEATH_SLOWMO = 0.35;      // el mundo corre a este ritmo mientras cae
+  let dying  = false;
+  let dyingT = 0;
+  let transitioning = false;      // cierre de nivel: sin control ni daño
+  const deathVeil = document.createElement('div');
+  deathVeil.style.cssText = `
+    position: fixed; inset: 0; z-index: 150; pointer-events: none; opacity: 0;
+    transition: opacity ${DEATH_FALL}s ease-in;
+    background: radial-gradient(ellipse at center, rgba(120,0,0,0.25) 0%, rgba(70,0,0,0.85) 75%, rgba(10,0,0,0.95) 100%);`;
+  document.body.appendChild(deathVeil);
 
   let gameOverAt = 0;             // momento del game over (para exigir un tap de Espacio)
   const onDeath = () => {
     lives--;
     renderLives();
-    if (lives > 0) {
-      respawn();
-    } else {
-      gameOver = true;
-      gameOverAt = performance.now();
-      gameOverEl.classList.remove('hidden');
-    }
+    dying  = true;
+    dyingT = 0;
+    invuln = Infinity;            // nada más lo lastima mientras cae
+    canito.group.visible = true;
+    deathVeil.style.opacity = '1';
+    music.stopSong();
+    setTimeout(() => {
+      music.playLose();             // suena con la carátula / el GAME OVER
+      if (lives > 0) {
+        const quedan = `Te ${lives === 1 ? 'queda 1 vida' : `quedan ${lives} vidas`}`;
+        showCard([{ title: '¡AY, CANITO!', color: '#ff5a4a', subtitle: quedan }], {
+          onBlack: () => {
+            respawn();
+            deathVeil.style.transition = 'none';
+            deathVeil.style.opacity = '0';
+            requestAnimationFrame(() => { deathVeil.style.transition = `opacity ${DEATH_FALL}s ease-in`; });
+          },
+          onReveal: () => {
+            dying  = false;
+            invuln = 2.5;           // i-frames + parpadeo al revivir
+            music.restartSong();    // la canción vuelve a empezar desde el principio
+          },
+        });
+      } else {
+        dying = false;
+        gameOver = true;
+        gameOverAt = performance.now();
+        gameOverEl.classList.remove('hidden');
+      }
+    }, DEATH_FALL * 1000);
   };
 
   const setHP = (hp: number, attackerX?: number, attackerZ?: number) => {
     const isDamage = hp < canitoHP;
     // Ignorar daño durante la invulnerabilidad, en modo vida infinita o si terminó
-    if (isDamage && (invuln > 0 || gameOver || godMode)) return;
+    if (isDamage && (invuln > 0 || dying || transitioning || gameOver || godMode)) return;
     const prev = canitoHP;
     canitoHP = Math.max(0, hp);
     if (canitoHP < prev) {
@@ -788,7 +889,7 @@ async function main(): Promise<void> {
       sound.yelp();
     }
     renderHP();
-    if (canitoHP === 0 && !gameOver) {
+    if (canitoHP === 0 && !gameOver && !dying) {
       onDeath();
     }
   };
@@ -823,23 +924,12 @@ async function main(): Promise<void> {
 
   const tmpDir = new THREE.Vector3();
 
-  // ── Monedas por RESCATE: matar al zombie que perseguía a un civil ───────────
-  let coins = 0;
-  const coinsHud = document.createElement('div');
-  coinsHud.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:120;' +
-    'font:800 16px system-ui,sans-serif;color:#ffd24a;background:rgba(13,17,23,0.82);' +
-    'border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:6px 14px;pointer-events:none;';
-  document.body.appendChild(coinsHud);
-  const renderCoins = () => { coinsHud.textContent = `💰 ${coins}`; };
-  renderCoins();
-  const SAVE_RADIUS = 9;
-  const SAVE_REWARD = 15;
-
   // Helpers — kill a zombie with blood + groan
   // Instakill for normal enemies; bosses (caballitos) only take chip damage from
   // area sources so they can't be finished off by a stray blast/Aullido/tram —
   // you must deliberately wear both down with fireballs.
   const AREA_BOSS_DMG = 6;
+  const ALERT_R = 18;   // al caer un zombie, se despiertan los de alrededor
   const killZombie = (z: ZombieGaucho, byPlayer = true) => {
     if (!z.alive) return;
     if (z.isCaballito || z.isBoss) {
@@ -852,10 +942,9 @@ async function main(): Promise<void> {
     }
     killCount++;
     hudKills.textContent = killCount.toString();
-    // ¿Salvaste a alguien? Si había un civil cerca del zombie que cayó, +monedas.
-    if (byPlayer) {
-      const nc = civilians.nearest(z.position.x, z.position.z);
-      if (nc && nc.d < SAVE_RADIUS) { coins += SAVE_REWARD; renderCoins(); flashBanner(`+${SAVE_REWARD} 💰 ¡Rescate!`, '#ffd24a'); }
+    // El ruido despierta a los que estaban cerca.
+    for (const o of zombies) {
+      if (o.alive && Math.hypot(o.position.x - z.position.x, o.position.z - z.position.z) < ALERT_R) o.alert();
     }
     z.remove(engine.scene);
   };
@@ -863,13 +952,16 @@ async function main(): Promise<void> {
   // Blast — explode a car at idx and damage everything within radius
   const BLAST_RADIUS  = 7;
   const BLAST_DMG_CANITO = 5;
-  const explodeCar = (idx: number) => {
+  // Sólo algunos estacionados traen premio (y sólo si los rompe Canito).
+  const PARKED_DROP_CHANCE = 0.3;
+  const explodeCar = (idx: number, byPlayer = true) => {
     const car = parkedCars.cars[idx];
     if (!car || car.exploded) return;
     const pos = new THREE.Vector3(car.x, 0, car.z);
     parkedCars.explode(idx);
     effects.spawnExplosion(pos);
     sound.boom();
+    if (byPlayer && Math.random() < PARKED_DROP_CHANCE) dropPrize(car.x, car.z);
 
     // Kill any zombies in blast radius (with blood)
     for (const z of zombies) {
@@ -959,7 +1051,10 @@ async function main(): Promise<void> {
       const r = 40 + Math.random() * 30;
       const ax = PORTONES_X + Math.abs(Math.cos(a)) * r;   // sólo hacia +X (ciudad)
       const az = PORTONES_Z + Math.sin(a) * r;
-      if (addZombie(ax, az, true /* forceRunner */)) spawned++;
+      if (addZombie(ax, az, true /* forceRunner */)) {
+        zombies[zombies.length - 1].alert();   // la emboscada va directo por Canito
+        spawned++;
+      }
     }
     // Brief HUD flash to warn the player
     const warn = document.createElement('div');
@@ -1001,7 +1096,35 @@ async function main(): Promise<void> {
     outroCart   = vc;
     outroT      = OUTRO_DURATION;
     outroBoomCD = 0;
+    transitioning = true;         // Canito mira el espectáculo: sin control ni daño
     flashBanner('💥 ¡El Carro de la Vendimia se viene abajo!', '#ff8a40');
+  };
+
+  // Arranque del Nivel 2 (con la carátula tapando la pantalla): Canito pasa al
+  // otro lado de la calle Chile con la vida llena, el Nivel 1 queda limpio
+  // (sin zombies, autos zombi ni proyectiles) y la reaparición pasa a ser ahí.
+  const setupLevel2 = () => {
+    let sx = CHILE_X - 14;
+    const sz = START_Z;
+    for (let g = 0; g < 30 && insideAnyCollider(sx, sz, 0.8); g++) sx -= 2;
+    checkpoint.x = sx; checkpoint.z = sz;
+    checkpointLine = CHILE_X;
+    respawn();
+    for (const z of zombies) {
+      if (z.alive && !z.isCaballito && z.position.x > CHILE_X - 30) {
+        z.takeDamage(z.hp);
+        z.remove(engine.scene);
+      }
+    }
+    for (const gc of gauchoCars) {
+      if (gc.alive && gc.position.x > CHILE_X - 30) {
+        gc.takeDamage(gc.hp);
+        gc.remove(engine.scene);
+      }
+    }
+    level1Cleared = true;
+    level = 2;
+    renderLevel();
   };
   const updateLevel1Outro = (dt: number) => {
     if (outroT <= 0) return;
@@ -1026,13 +1149,20 @@ async function main(): Promise<void> {
         outroCart = null;
       }
       sound.boom();
-      level1Cleared = true;
-      level = 2;
-      renderLevel();
-      // Carátula "NIVEL 2" con las vidas restantes (como al arrancar un mundo de
-      // Mario). Canito queda invulnerable mientras se muestra la pantalla.
-      invuln = Math.max(invuln, 3.4);
-      showLevelCard(2, '¡A los Portones del Parque!');
+      flashBanner('🏆 ¡NIVEL 1 SUPERADO!', '#ffd24a');
+      // Un respiro para ver el humo, y después la carátula: "superado" con el
+      // balance y "NIVEL 2" (como al pasar de mundo en Mario). Detrás del negro
+      // se arma el Nivel 2.
+      setTimeout(() => {
+        showCard([
+          { title: '¡NIVEL 1 SUPERADO!', color: '#7eff8a',
+            subtitle: `Cayó el Carro de la Vendimia · ${killCount} gauchos kabum 🔥` },
+          { title: 'NIVEL 2', color: '#ffd24a', subtitle: '¡A los Portones del Parque!' },
+        ], {
+          onBlack: setupLevel2,
+          onReveal: () => { transitioning = false; invuln = 2.5; },
+        });
+      }, 1600);
     }
   };
 
@@ -1045,10 +1175,6 @@ async function main(): Promise<void> {
     if (level1BossActive || gameOver || victory) return;
     if (canitoPos.x > CHILE_X + 6) return;   // recién al llegar a Chile
     level1BossActive = true;
-
-    // Checkpoint a la fuente de la plaza para no rehacer todo el Nivel 1 si caés
-    // peleando contra el Carro.
-    checkpoint.x = 26; checkpoint.z = 0; passedPlaza = true;
 
     let spawned = 0, tries = 0;
     while (spawned < 8 && tries++ < 200) {
@@ -1088,18 +1214,14 @@ async function main(): Promise<void> {
   let carInfectCD = 0.5;                     // cuenta regresiva para infectar autos
   const _zTarget = new THREE.Vector3();      // target reusable (humano más cercano)
   const zHazards: { x: number; z: number }[] = [];   // posiciones de zombies (pánico del tránsito)
-  const INNOCENT_PENALTY = 2;                        // vida que pierde Canito al matar un inocente
 
-  // Distracción de los zombies: sólo se desvían por un peatón/auto si lo tienen
-  // MUY cerca. Si el civil huye más allá de este radio, el zombie deja de
-  // correrlo y vuelve a ir por Canito, así no se pierden por toda la escena.
-  const CIV_HUNT_R = 16;                             // radio para cazar peatones
+  // Distracción de los zombies: sólo se desvían por un auto si lo tienen MUY
+  // cerca; si se aleja, vuelven a ir por Canito.
   const VEH_HUNT_R = 12;                             // radio para embestir autos/motos
 
-  // Atropello de los vehículos en pánico: mata civiles/zombies y lastima a Canito.
+  // Atropello de los vehículos en pánico: mata zombies y lastima a Canito.
   const trafficRunOver = (x: number, z: number): boolean => {
     let hit = false;
-    if (civilians.killArea(x, z, 2.0) > 0) { hit = true; effects.spawnBlood(new THREE.Vector3(x, 0.5, z)); }
     for (const z2 of zombies) {
       if (z2.alive && Math.hypot(z2.position.x - x, z2.position.z - z) < 2.0) { killZombie(z2, false); hit = true; }
     }
@@ -1107,7 +1229,16 @@ async function main(): Promise<void> {
     return hit;
   };
 
-  engine.start(dt => {
+  engine.start(rawDt => {
+    // Mientras Canito cae, el mundo va en cámara lenta (después lo tapa la
+    // carátula y respawn() lo endereza: no hay que volver a tumbarlo).
+    const falling = dying && dyingT < DEATH_FALL;
+    const dt = falling ? rawDt * DEATH_SLOWMO : rawDt;
+    if (falling) {
+      dyingT += rawDt;
+      const k = Math.min(1, dyingT / 0.45);
+      canito.group.rotation.z = (1 - (1 - k) * (1 - k)) * Math.PI / 2;   // cae de costado
+    }
     // Game over: esperar un tap de Espacio para empezar de nuevo (no auto-reinicio)
     if (gameOver) {
       if (performance.now() - gameOverAt > 600 &&
@@ -1116,22 +1247,33 @@ async function main(): Promise<void> {
       }
     }
 
-    if (!gameOver && !victory) canito.update(dt, input.keys, colliders);
+    if (!gameOver && !victory && !dying && !transitioning) canito.update(dt, input.keys, colliders);
     thirdPerson.update(canito.getPosition(), canito.getYRot());
 
     // Invulnerabilidad tras revivir: parpadeo de Canito
-    if (invuln > 0) {
+    if (invuln > 0 && !dying) {
       invuln -= dt;
       canito.group.visible = Math.floor(invuln * 12) % 2 === 0;
       if (invuln <= 0) canito.group.visible = true;
     }
 
-    // Checkpoint: al cruzar al oeste de la Plaza Independencia, la próxima
-    // reaparición es en su fuente.
-    if (!passedPlaza && canitoPos.x < -130) {
-      passedPlaza = true;
-      checkpoint.x = 26;  // junto a la fuente, fuera de su estanque
-      checkpoint.z = 0;
+    // ── Puntos de control: cada esquina del recorrido ────────────────────────
+    // Al cruzar una transversal hacia el oeste, la próxima reaparición es en
+    // esa esquina SOBRE LA AVENIDA del recorrido (z = START_Z), aunque Canito
+    // se haya desviado por una calle lateral. Sólo avanza, nunca retrocede. En
+    // el Nivel 1 el último es Av. Mitre (la plaza): Chile es la pelea del Carro.
+    if (!dying && !transitioning && !gameOver) {
+      const lineX = Math.ceil(canitoPos.x / CROSS_STEP) * CROSS_STEP;
+      if (lineX < checkpointLine && (level1Cleared || lineX > CHILE_X)) {
+        checkpointLine = lineX;
+        let sx = lineX;
+        // en la plaza la esquina cae en la fuente: correrse hacia atrás (este)
+        for (let g = 0; g < 30 && insideAnyCollider(sx, START_Z, 0.8); g++) sx += 2;
+        checkpoint.x = sx;
+        checkpoint.z = START_Z;
+        const name = crossStreetName(lineX);
+        if (name) toast(`📍 Punto de control: ${name}`);
+      }
     }
 
     // ── Barrera de la calle Chile (frontera Nivel 1 ↔ Nivel 2) ───────────────
@@ -1148,11 +1290,9 @@ async function main(): Promise<void> {
     env.update(dt, canitoPos.x, canitoPos.z);
     plaza.update(dt);
 
-    // ── Ciudad viva: autos ambientales (en pánico) + civiles que huyen ───────
-    civBuf.length = 0; civilians.positions(civBuf);
+    // ── Ciudad viva: autos ambientales (en pánico) ──────────────────────────
     trafficObstacles.length = 0;
     trafficObstacles.push({ x: canitoPos.x, z: canitoPos.z, r: 0.9, honk: false });
-    for (const q of civBuf) trafficObstacles.push({ x: q.x, z: q.z, r: 0.5, honk: false });
     // Zombies = peligro: el tránsito que los tenga cerca entra en pánico.
     zHazards.length = 0;
     let nearZ = 0;
@@ -1165,7 +1305,7 @@ async function main(): Promise<void> {
     traffic.update(dt, trafficObstacles, zHazards, trafficRunOver);
 
     // Intensidad de la música: sube con zombies cerca; al máximo con jefes cerca.
-    if (gameOver || victory) {
+    if (gameOver || victory || dying || transitioning) {
       music.setIntensity(0);
     } else {
       let inten = Math.min(0.8, nearZ / 6);
@@ -1177,22 +1317,7 @@ async function main(): Promise<void> {
       music.setIntensity(inten);
     }
 
-    // Civiles: huyen de los zombies; al ser mordidos convulsionan y se
-    // transforman en zombies nuevos.
     if (!gameOver && !victory) {
-      const born = civilians.update(
-        dt, zombies, worldColliders, engine.scene, canitoPos.x, canitoPos.z,
-        (sx, sz) => {
-          // ¡Persona rescatada! Recompensa: cura + contador + festejo.
-          savedCount++; hudSaved.textContent = savedCount.toString();
-          if (canitoHP < MAX_HP) setHP(Math.min(MAX_HP, canitoHP + 2));
-          effects.spawnShockwave(new THREE.Vector3(sx, 0.3, sz), 2.2);
-          canito.bark();
-          sound.bark();
-        },
-      );
-      for (const [bx, bz] of born) addZombie(bx, bz, Math.random() < 0.3);
-
       // Zombies que alcanzan un auto lo "infectan" → auto zombi (GauchoCar).
       carInfectCD -= dt;
       if (carInfectCD <= 0 && gauchoCars.length < 28) {
@@ -1256,13 +1381,14 @@ async function main(): Promise<void> {
 
     // ── Disparo + carga del Aullido Cósmico ──────────────────────────────────
     // Tap = una bola de fuego. Mantener apretado = cargar el poder, y mientras
-    // carga NO se sueltan bolas.
-    const firing = !gameOver && !victory &&
+    // carga NO se sueltan bolas. Con un arma (metralla/escopeta) mantener
+    // apretado dispara en ráfaga y el poder NO se carga.
+    const firing = !gameOver && !victory && !dying && !transitioning &&
         (input.keys.has('Space') || input.keys.has('KeyB'));
     const fireJustPressed = firing && !firePrev;
     firePrev = firing;
 
-    if (firing) {
+    if (firing && !weapon) {
       powerCharge += dt / POWER_CHARGE_TIME;
       if (powerCharge >= 1) { powerCharge = 0; unleashPower(); }
     } else {
@@ -1273,7 +1399,33 @@ async function main(): Promise<void> {
 
     // Sólo dispara al pulsar (flanco), nunca mientras se mantiene/carga
     barkCD -= dt;
-    if (fireJustPressed && barkCD <= 0) {
+    if (weapon && firing && barkCD <= 0) {
+      const w = WEAPONS[weapon];
+      barkCD = w.cooldown;
+      const yr = canito.getYRot();
+      for (let p = 0; p < w.pellets; p++) {
+        // Escopeta: abanico parejo + algo de ruido. Metralla: sólo ruido.
+        const fan = w.pellets > 1 ? (p / (w.pellets - 1) - 0.5) * w.spread : 0;
+        const a = yr + fan + (Math.random() - 0.5) * (w.pellets > 1 ? 0.08 : w.spread);
+        const dir = new THREE.Vector3(Math.sin(a), 0, Math.cos(a));
+        const origin = canitoPos.clone();
+        origin.y += 0.75;
+        origin.add(dir.clone().multiplyScalar(0.9));
+        const fb = new Fireball(origin, dir, {
+          scale: w.scale, speed: w.speed, life: w.life, light: false, damage: w.damage,
+        });
+        engine.scene.add(fb.group);
+        fireballs.push(fb);
+      }
+      canito.bark();
+      sound.bark();
+      ammo--;
+      if (ammo <= 0) {
+        weapon = null;
+        flashBanner('Sin munición — vuelve el fuego 🔥', '#ff8a40');
+      }
+      renderWeapon();
+    } else if (!weapon && fireJustPressed && barkCD <= 0) {
       barkCD = 0.2;
       const yr = canito.getYRot();
       tmpDir.set(Math.sin(yr), 0, Math.cos(yr));
@@ -1292,18 +1444,15 @@ async function main(): Promise<void> {
     for (const z of zombies) {
       if (!z.alive) continue;
       // Culling por distancia: lejos → invisible y sin IA/colisión (rinde con
-      // muchos zombies + civiles).
+      // muchos zombies).
       const zdx = z.position.x - canitoPos.x, zdz = z.position.z - canitoPos.z;
       if (zdx * zdx + zdz * zdz > ZCULL2) {
         if (z.group.visible) z.group.visible = false;
         continue;
       }
       if (!z.group.visible) z.group.visible = true;
-      // Si está sosteniendo a un civil (cuenta regresiva), queda quieto: no
-      // persigue ni ataca a Canito hasta convertir/soltar a la víctima.
-      if (z.grabbing) continue;
       // Target: Canito por defecto. Los zombies normales sólo se desvían por un
-      // peatón/auto si lo tienen a mano (dentro de su radio de caza); si la
+      // auto si lo tienen a mano (dentro de su radio de caza); si la
       // presa huye lejos, la sueltan y vuelven por Canito. Los jefes/throwers/
       // reinas siempre van por Canito.
       let tgt: THREE.Vector3 = canitoPos;
@@ -1311,13 +1460,11 @@ async function main(): Promise<void> {
       if (!z.isThrower && !z.isQueen && !z.isCaballito && !z.isBoss) {
         let bd = Math.hypot(canitoPos.x - z.position.x, canitoPos.z - z.position.z);
         let bx = canitoPos.x, bz = canitoPos.z, isCan = true;
-        const nc = civilians.nearest(z.position.x, z.position.z);
-        if (nc && nc.d < bd && nc.d < CIV_HUNT_R) { bd = nc.d; bx = nc.x; bz = nc.z; isCan = false; }
         const nv = traffic.nearest(z.position.x, z.position.z);   // también embisten autos/motos
         if (nv && nv.d < bd && nv.d < VEH_HUNT_R) { bd = nv.d; bx = nv.x; bz = nv.z; isCan = false; }
         if (!isCan) { _zTarget.set(bx, 0, bz); tgt = _zTarget; tgtIsCanito = false; }
       }
-      const r = z.update(dt, tgt, worldColliders);
+      const r = z.update(dt, tgt, worldGrid);
       if (r.hitTarget && tgtIsCanito && !gameOver) {
         setHP(canitoHP - (z.isCaballito ? 3 : 1), z.position.x, z.position.z);
         sound.bite();
@@ -1496,7 +1643,7 @@ async function main(): Promise<void> {
         const car = parkedCars.cars[ci];
         if (car.exploded) continue;
         if (Math.hypot(gc.position.x - car.x, gc.position.z - car.z) < 3.4) {
-          explodeCar(ci);
+          explodeCar(ci, false);   // lo chocó un auto zombi: sin premio
           gc.takeDamage(1);
           if (!gc.alive) {
             effects.spawnExplosion(gc.position.clone());
@@ -1510,17 +1657,14 @@ async function main(): Promise<void> {
       }
       if (!gc.alive) continue;
 
-      const r = gc.update(dt, canitoPos, worldColliders);
+      const r = gc.update(dt, canitoPos, worldGrid);
       if (r.hitTarget && !gameOver) {
         setHP(canitoHP - GauchoCar.HIT_DAMAGE, gc.position.x, gc.position.z);
         sound.boom();
         effects.spawnExplosion(gc.position.clone());
       }
 
-      // Atropella humanos (los mata) y embiste autos/motos (los convierte).
-      if (civilians.killArea(gc.position.x, gc.position.z, 2.4) > 0) {
-        effects.spawnBlood(gc.position.clone());
-      }
+      // Embiste autos/motos (los convierte).
       const hitCar = traffic.infectNear(gc.position.x, gc.position.z, 3.0);
       if (hitCar && gauchoCars.length < 28) {
         const nc = new GauchoCar();
@@ -1556,9 +1700,31 @@ async function main(): Promise<void> {
       const fb = fireballs[i];
       fb.update(dt, wallColliders);
       if (fb.alive) {
-        // Zombie hits
+        // ── Empanadas y mates en el aire: chocan con la bola de fuego ─────────
+        // y explotan los dos. La bola vuela a altura fija y el mate viene en
+        // arco: el radio vertical es generoso (SNACK_BURN_Y) para que
+        // interceptarlos sea una jugada realista y no un golpe de suerte.
         let hit = false;
+        for (let si = gauchoSnacks.length - 1; si >= 0; si--) {
+          const sk = gauchoSnacks[si];
+          if (!sk.alive) continue;
+          const sdx = sk.position.x - fb.position.x;
+          const sdz = sk.position.z - fb.position.z;
+          if (Math.abs(sk.position.y - fb.position.y) > SNACK_BURN_Y) continue;
+          if (sdx * sdx + sdz * sdz < SNACK_BURN_R * SNACK_BURN_R) {
+            sk.kill();
+            fb.kill();
+            hit = true;
+            effects.spawnExplosion(sk.position.clone());
+            sound.sizzle();
+            break;
+          }
+        }
+
+        // Zombie hits
+        // Zombie hits
         for (const z of zombies) {
+          if (hit) break;
           if (!z.alive) continue;
           if (Math.hypot(z.position.x - fb.position.x, z.position.z - fb.position.z) < ZombieGaucho.HIT_RADIUS) {
             fb.kill();
@@ -1566,7 +1732,7 @@ async function main(): Promise<void> {
             if (z.isQueen || z.isBoss || z.isCaballito) {
               // Reinas (3), boss y caballitos (24) aguantan varias bolas de
               // fuego — sangran en cada impacto y sólo caen al agotar su HP.
-              z.takeDamage(1);
+              z.takeDamage(fb.damage);
               effects.spawnBlood(z.position);
               if (z.alive) {
                 sound.groan();
@@ -1600,7 +1766,7 @@ async function main(): Promise<void> {
           for (const gc of gauchoCars) {
             if (!gc.alive) continue;
             if (Math.hypot(gc.position.x - fb.position.x, gc.position.z - fb.position.z) < 2.5) {
-              gc.takeDamage(1);
+              gc.takeDamage(fb.damage);
               fb.kill();
               if (!gc.alive) {
                 killCount++;
@@ -1626,7 +1792,7 @@ async function main(): Promise<void> {
           for (const vc of vendimiaCarts) {
             if (!vc.alive) continue;
             if (Math.hypot(vc.position.x - fb.position.x, vc.position.z - fb.position.z) < 4.2) {
-              vc.takeDamage(1);
+              vc.takeDamage(fb.damage);
               fb.kill();
               hit = true;
               effects.spawnBlood(vc.position);
@@ -1644,16 +1810,14 @@ async function main(): Promise<void> {
           }
         }
 
-        // (Las bolas de fuego ya NO matan civiles: a la gente se la salva
-        // matando al zombie que la tiene agarrada, no quemándola.)
-
-        // Autos/motos circulando (no zombis): Canito los puede destruir, pero
-        // también le quita vida (era gente).
-        if (!hit && traffic.killNear(fb.position.x, fb.position.z, 2.4)) {
+        // Autos/motos circulando (no zombis): Canito los puede destruir sin
+        // penalidad, y sueltan un premio (huesito o arma).
+        const wreck = hit ? null : traffic.killNear(fb.position.x, fb.position.z, 2.4);
+        if (wreck) {
+          dropPrize(wreck.x, wreck.z);
           fb.kill();
           effects.spawnExplosion(fb.position.clone());
           sound.boom();
-          if (!gameOver) setHP(canitoHP - INNOCENT_PENALTY);
           hit = true;
         }
 
@@ -1678,6 +1842,24 @@ async function main(): Promise<void> {
           b.remove(engine.scene);
           bones.splice(i, 1);
         }
+      }
+    }
+
+    // ── Armas tiradas ──────────────────────────────────────────────────────
+    for (let i = weaponPickups.length - 1; i >= 0; i--) {
+      const wp = weaponPickups[i];
+      wp.update(dt);
+      if (!gameOver && Math.hypot(wp.position.x - canitoPos.x, wp.position.z - canitoPos.z) < WeaponPickup.PICKUP_R) {
+        wp.pickup();
+        // Misma arma → suma munición; otra → la reemplaza.
+        ammo = weapon === wp.kind ? ammo + WEAPONS[wp.kind].ammo : WEAPONS[wp.kind].ammo;
+        weapon = wp.kind;
+        powerCharge = 0;
+        renderWeapon();
+        flashBanner(`¡${WEAPONS[wp.kind].label}!`, wp.kind === 'metralla' ? '#40e0ff' : '#ff40c0');
+        sound.pickup();
+        wp.remove(engine.scene);
+        weaponPickups.splice(i, 1);
       }
     }
 

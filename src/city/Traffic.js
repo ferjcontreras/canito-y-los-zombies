@@ -259,7 +259,8 @@ export class TrafficManager {
         }
         return found ? { x: bx, z: bz, d: best } : null;
     }
-    /** Destruye un vehículo cerca del punto (Canito puede matarlos). */
+    /** Destruye un vehículo cerca del punto (Canito puede matarlos). Devuelve
+     *  dónde estaba (para soltar premios), o null si no había ninguno. */
     killNear(x, z, r) {
         const r2 = r * r;
         for (let i = 0; i < this.vehicles.length; i++) {
@@ -270,10 +271,10 @@ export class TrafficManager {
                 v.col.minX = v.col.maxX = 1e6;
                 v.col.minZ = v.col.maxZ = 1e6;
                 this.vehicles.splice(i, 1);
-                return true;
+                return { x: v.agent.x, z: v.agent.z };
             }
         }
-        return false;
+        return null;
     }
     /** Estados para el audio posicional (posición, velocidad, tipo). */
     states() {
