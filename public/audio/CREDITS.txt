@@ -1,0 +1,10 @@
+bark.mp3      — ladrido de Canito (traído de canito-ciudad).
+music.mp3     — música de fondo.
+kids.mp3      — griterío de los niños zombi. Audio de YouTube ("Niños gritando -
+                Kids Yeah Sound", youtube.com/watch?v=CnQM3mDg9HU), sin licencia indicada.
+tram-horn.mp3 — bocina del Metrotranvía y ruedas sobre los rieles. Audio de YouTube
+                ("Metrotranvia de Mendoza", TransMauri Chile,
+                youtube.com/watch?v=Oh8YErW7l4k, desde 2:06), sin licencia indicada.
+
+NOTA: los dos clips de YouTube pueden tener derechos; para publicar el juego
+habría que licenciarlos o reemplazarlos manteniendo los mismos nombres.

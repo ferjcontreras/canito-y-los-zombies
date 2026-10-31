@@ -129,6 +129,18 @@ export class Tram {
     this._place();
   }
 
+  /** Metros entre el frente del tranvía y (px,pz) si éste está sobre las vías
+   *  (a menos de `lateral`) y por delante de la marcha; si no, null. */
+  distanceAhead(px: number, pz: number, lateral: number): number | null {
+    if (this._dwell > 0) return null;
+    const wx = px - this.group.position.x;
+    const wz = pz - this.group.position.z;
+    const lx = this._cosA * wx - this._sinA * wz;
+    const lz = this._sinA * wx + this._cosA * wz;
+    const ahead = lz * this._dir - Tram.HALF_LEN;
+    return Math.abs(lx) < lateral && ahead > 0 ? ahead : null;
+  }
+
   /** True if world point (px,pz) within r lies under the tram body. */
   hits(px: number, pz: number, r: number): boolean {
     const wx = px - this.group.position.x;

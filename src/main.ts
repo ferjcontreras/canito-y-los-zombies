@@ -464,46 +464,164 @@ async function main(): Promise<void> {
   const caballitos: ZombieGaucho[] = [];   // los dos jefes; el nivel termina al matarlos
 
   const RUNNER_PROB = 0.35;
+  const STREET_BAND = 34;   // los grupos esperan a esta distancia de la calle, como mucho
+  const BLOCK_SIZE = 100;   // las transversales están cada 100 m
+  let wokenBlock = Math.ceil(START_X / BLOCK_SIZE);   // última cuadra que se despertó
+  // Las cuadras despiertan un poco antes de que Canito llegue, para que los
+  // caminantes alcancen a salirle al paso. Al reaparecer se espera a que pase la
+  // esquina: si no, lo sorprenderían apenas revive.
+  const WAKE_LEAD = 30;
+  let wakeLead = WAKE_LEAD;
+  const wakeBlock = (b: number) => {
+    wokenBlock = b;
+    wakeLead = WAKE_LEAD;
+    for (const z of zombies) if (z.alive && z.block === b) z.wake();
+  };
   const insideAnyCollider = (x: number, z: number, r = 0.5): boolean => worldGrid.hits(x, z, r);
-  const addZombie = (zx: number, zz: number, forceRunner = false, thrower = false, queen = false): boolean => {
+  const addZombie = (zx: number, zz: number, forceRunner = false, thrower = false, queen = false,
+                     kind: { child?: boolean; dog?: boolean } = {}): boolean => {
     // No spawnear dentro del parque (al oeste del muro): sólo se entra por la puerta
     if (zx < PORTONES_X + 1) return false;
     if (insideAnyCollider(zx, zz, thrower ? 0.9 : 0.5)) return false;
-    const runner = !thrower && !queen && (forceRunner || Math.random() < RUNNER_PROB);
-    const z = new ZombieGaucho({ runner, thrower, queen });
+    const runner = !thrower && !queen && !kind.child && !kind.dog && (forceRunner || Math.random() < RUNNER_PROB);
+    const z = new ZombieGaucho({ runner, thrower, queen, ...kind });
     z.position.set(zx, 0, zz);
     engine.scene.add(z.group);
     zombies.push(z);
     return true;
   };
 
-  // Un trío de caminantes a la vista desde la largada, pero lejos (fuera del
-  // radio en que notan a Canito): el primer cruce lo decide el jugador.
-  addZombie(START_X - 80, START_Z + 1);
-  addZombie(START_X - 88, START_Z - 6);
-  addZombie(START_X - 96, START_Z + 8);
+  // ¿Hay algo sólido entre (x,z) y el punto (ax,az)?
+  const sightBlocked = (x: number, z: number, ax: number, az: number): boolean => {
+    const d = Math.hypot(ax - x, az - z);
+    for (let t = 1.5; t < d; t += 1.5) {
+      if (insideAnyCollider(x + (ax - x) * t / d, z + (az - z) * t / d, 0.3)) return true;
+    }
+    return false;
+  };
+  // Escondido = no se lo ve desde ningún punto de la calle z=az en esa cuadra,
+  // esquinas incluidas (así tampoco queda a la vista en la transversal).
+  const hiddenFromStreet = (x: number, z: number, xMin: number, xMax: number, az: number): boolean => {
+    for (let ax = xMin - 10; ax <= xMax + 10; ax += 20) {
+      if (!sightBlocked(x, z, ax, az)) return false;
+    }
+    return true;
+  };
+  // Simula la persecución (recta, deslizando contra las paredes) hasta la
+  // calle: descarta los rincones de los que el zombie no sabría salir.
+  const reachesStreet = (x: number, z: number, ax: number, az: number): boolean => {
+    const r = ZombieGaucho.COLLIDER_R;
+    for (let i = 0; i < 200; i++) {
+      const d = Math.hypot(ax - x, az - z);
+      if (d < 3) return true;
+      const nx = x + (ax - x) / d, nz = z + (az - z) / d;
+      if (!insideAnyCollider(nx, nz, r)) { x = nx; z = nz; }
+      else if (!insideAnyCollider(nx, z, r)) x = nx;
+      else if (!insideAnyCollider(x, nz, r)) z = nz;
+      else return false;
+    }
+    return false;
+  };
 
-  // Horda concentrada a lo largo de la avenida que recorre Canito (largada →
-  // Portones), NO dispersa por toda la ciudad. Una banda alrededor de la ruta
-  // (z≈0), saltando la Plaza Independencia. Así cada nivel se lee claro y las
-  // cuadras alejadas quedan tranquilas. El Nivel 1 (este de Chile) arranca con
-  // más densidad para que haya acción enseguida.
+  // Horda repartida por cuadras a lo largo de la avenida que recorre Canito
+  // (largada → Portones), NO dispersa por toda la ciudad: una banda alrededor
+  // de la ruta (z≈0), saltando la Plaza Independencia. Cada cuadra tiene su
+  // grupo, que espera escondido entre los edificios hasta que Canito llega a
+  // ella (ver wakeBlock). El Nivel 1 (este de Chile) tiene más densidad para
+  // que haya acción enseguida.
   {
-    const HORDE_L1 = 85;   // tramo este (Nivel 1): START_X → calle Chile (x=-100)
-    const HORDE_L2 = 40;   // tramo oeste (Nivel 2): Chile → Portones
-    const band = (n: number, xMin: number, xMax: number, halfZ: number) => {
+    const BLOCK_L1 = 10;   // zombies por cuadra, Nivel 1: START_X → calle Chile (x=-100)
+    const BLOCK_L2 = 7;    // zombies por cuadra, Nivel 2: Chile → Portones
+    const band = (n: number, xMin: number, xMax: number, halfZ: number, block: number) => {
+      const xMid = (xMin + xMax) / 2;
       let spawned = 0, tries = 0;
-      while (spawned < n && tries++ < n * 25) {
+      while (spawned < n && tries++ < n * 300) {
         const zx = xMin + Math.random() * (xMax - xMin);
-        const zz = START_Z + (Math.random() - 0.5) * halfZ * 2;
+        // Si cerca de la calle no hay huecos, completa el grupo un poco más atrás.
+        const reach = tries < n * 150 ? halfZ : 55;
+        const zz = START_Z + (Math.random() - 0.5) * reach * 2;
         if (Math.hypot(zx - START_X, zz - START_Z) < 75) continue;   // largada tranquila
         if (Math.hypot(zx, zz) < 150) continue;             // Plaza Independencia
-        if (addZombie(zx, zz)) spawned++;
+        if (insideAnyCollider(zx, zz, 0.5) || !hiddenFromStreet(zx, zz, xMin, xMax, START_Z)) continue;
+        if (![xMin, xMid, xMax].every(ax => reachesStreet(zx, zz, ax, START_Z))) continue;
+        if (addZombie(zx, zz)) {
+          zombies[zombies.length - 1].guardBlock(block);
+          spawned++;
+        }
       }
     };
-    band(HORDE_L1, CHILE_X + 10, START_X - 30, 55);
-    band(HORDE_L2, PORTONES_X + 40, CHILE_X - 10, 55);
+    // Una cuadra `b` va de la transversal (b-1)·100 a la b·100. La de la largada
+    // queda libre, y el Nivel 2 evita lo que setupLevel2() limpia al oeste de Chile.
+    for (let b = Math.floor(START_X / BLOCK_SIZE); b > PORTONES_X / BLOCK_SIZE; b--) {
+      const west = (b - 1) * BLOCK_SIZE + 10, east = b * BLOCK_SIZE - 10;
+      if (east > CHILE_X) band(BLOCK_L1, west, east, STREET_BAND, b);
+      else band(BLOCK_L2, Math.max(west, PORTONES_X + 40), Math.min(east, CHILE_X - 30), STREET_BAND, b);
+    }
+
+    // Plaza Independencia: gauchos, niños y perros. Es abierta y no hay dónde
+    // esconderse, así que cada mitad (una cuadra) espera bajo tierra y brota
+    // cuando Canito entra en ella.
+    const PLAZA_HALF = 85;
+    const plazaGroup = (n: number, b: number, kind: { child?: boolean; dog?: boolean } = {}) => {
+      let spawned = 0, tries = 0;
+      while (spawned < n && tries++ < n * 50) {
+        const zx = (b - 1) * BLOCK_SIZE + 8 + Math.random() * (BLOCK_SIZE - 16);
+        const zz = START_Z + (Math.random() - 0.5) * PLAZA_HALF * 2;
+        if (insideAnyCollider(zx, zz, 0.5)) continue;
+        // Hasta la punta exterior del paseo central (el centro lo ocupan las fuentes).
+        if (!reachesStreet(zx, zz, b > 0 ? 97 : -90, START_Z)) continue;
+        if (addZombie(zx, zz, false, false, false, kind)) {
+          zombies[zombies.length - 1].guardBlock(b, true);
+          spawned++;
+        }
+      }
+    };
+    for (const b of [1, 0]) {
+      plazaGroup(5, b);
+      plazaGroup(5, b, { child: true });
+      plazaGroup(3, b, { dog: true });
+    }
   }
+
+  // Calles laterales: para que no haya atajo libre, cada cuadra fuera de la
+  // avenida también tiene su grupo. Son demasiadas para tenerlas pobladas de
+  // entrada, así que se llenan al llegar Canito: el grupo brota escondido entre
+  // los edificios y sale directo a buscarlo.
+  const SIDE_ZOMBIES = 6;
+  const sideZombies: ZombieGaucho[] = [];
+  const sideVisited = new Set<string>();
+  const fillSideBlock = (b: number, row: number) => {
+    const xMin = (b - 1) * BLOCK_SIZE + 10, xMax = b * BLOCK_SIZE - 10, xMid = (xMin + xMax) / 2;
+    const az = row * BLOCK_SIZE;
+    let spawned = 0, tries = 0;
+    while (spawned < SIDE_ZOMBIES && tries++ < SIDE_ZOMBIES * 100) {
+      const zx = xMin + Math.random() * (xMax - xMin);
+      const zz = az + (Math.random() - 0.5) * STREET_BAND * 2;
+      if (Math.abs(zx) < 100 && Math.abs(zz) < 100) continue;   // Plaza Independencia
+      if (Math.hypot(zx - canito.group.position.x, zz - canito.group.position.z) < 25) continue;
+      if (insideAnyCollider(zx, zz, 0.5) || !hiddenFromStreet(zx, zz, xMin, xMax, az)) continue;
+      if (!sightBlocked(zx, zz, canito.group.position.x, canito.group.position.z)) continue;
+      if (![xMin, xMid, xMax].every(ax => reachesStreet(zx, zz, ax, az))) continue;
+      // Un trío rápido por grupo: a pie solos no alcanzarían a un Canito en sprint.
+      const kind = spawned % 3 === 2 ? { dog: true } : {};
+      if (addZombie(zx, zz, spawned % 3 === 0, false, false, kind)) {
+        const z = zombies[zombies.length - 1];
+        z.wake();
+        sideZombies.push(z);
+        spawned++;
+      }
+    }
+  };
+  // Al perder una vida se van: las cuadras se vuelven a llenar al regresar.
+  const clearSideBlocks = () => {
+    for (const z of sideZombies) {
+      if (!z.alive) continue;
+      z.takeDamage(z.hp);
+      z.remove(engine.scene);
+    }
+    sideZombies.length = 0;
+    sideVisited.clear();
+  };
 
   // ── Throwers: heavy gauchos guarding the Portones ─────────────────────────
   {
@@ -580,8 +698,9 @@ async function main(): Promise<void> {
 
   // ── Premios que sueltan los autos/motos destruidos ─────────────────────────
   // Cada auto en movimiento que Canito rompe suelta un huesito de vida o un
-  // arma (metralla / escopeta) con munición limitada; al agotarse vuelve a la
-  // bola de fuego de siempre.
+  // arma (metralla / escopeta) con munición limitada. Las armas se guardan
+  // todas (1/2/3 o Q para elegir); al agotarse una pasa a la otra o a la bola
+  // de fuego de siempre, y al perder una vida se pierden todas.
   const weaponPickups: WeaponPickup[] = [];
   const WEAPONS: Record<WeaponKind, {
     label: string; ammo: number; cooldown: number; pellets: number; spread: number;
@@ -595,7 +714,8 @@ async function main(): Promise<void> {
                 scale: 0.45, speed: 24, life: 0.65, damage: 0.4 },
   };
   let weapon: WeaponKind | null = null;   // null = bola de fuego normal
-  let ammo = 0;
+  const ammo: Record<WeaponKind, number> = { metralla: 0, escopeta: 0 };
+  const WEAPON_SLOTS: (WeaponKind | null)[] = [null, 'metralla', 'escopeta'];   // teclas 1, 2, 3
   const DROP_BONE_CHANCE = 0.5;
 
   const dropPrize = (x: number, z: number) => {
@@ -621,7 +741,23 @@ async function main(): Promise<void> {
   const hudKills = document.getElementById('hud-kills')!;
   const hudWeapon = document.getElementById('hud-weapon')!;
   const renderWeapon = () => {
-    hudWeapon.textContent = weapon ? `${WEAPONS[weapon].label} ×${ammo}` : '🔥 Fuego';
+    hudWeapon.innerHTML = WEAPON_SLOTS.map((k, i) => {
+      if (k && ammo[k] <= 0) return '';
+      const text = `${i + 1} ${k ? `${WEAPONS[k].label} ×${ammo[k]}` : '🔥 Fuego'}`;
+      return `<span style="display:block;text-align:right;${k === weapon ? '' : 'opacity:0.45'}">${text}</span>`;
+    }).join('');
+  };
+  const selectWeapon = (k: WeaponKind | null) => { weapon = k; renderWeapon(); };
+  const cycleWeapon = () => {
+    const from = WEAPON_SLOTS.indexOf(weapon);
+    for (let i = 1; i <= WEAPON_SLOTS.length; i++) {
+      const k = WEAPON_SLOTS[(from + i) % WEAPON_SLOTS.length];
+      if (!k || ammo[k] > 0) { selectWeapon(k); return; }
+    }
+  };
+  const loseWeapons = () => {
+    ammo.metralla = ammo.escopeta = 0;
+    selectWeapon(null);
   };
   const hudLives = document.getElementById('hud-lives')!;
   const gameOverEl = document.getElementById('game-over')!;
@@ -653,7 +789,12 @@ async function main(): Promise<void> {
   };
 
   // Autos ambientales que circulan por las calles y frenan ante Canito.
-  const traffic = new TrafficManager(engine.scene, graph, 90, 30);
+  // Los autos cruzan las vías en las esquinas, pero no circulan a lo largo de ellas.
+  const notOnTramLine = (i: number): boolean => {
+    const e = graph.edges[i];
+    return !onTramCorridor((e.ax + e.bx) / 2, (e.az + e.bz) / 2);
+  };
+  const traffic = new TrafficManager(engine.scene, graph, 90, 30, notOnTramLine);
 
   // Autos sólidos: Canito y los zombies no los atraviesan.
   colliders.push(...traffic.colliders());
@@ -683,7 +824,7 @@ async function main(): Promise<void> {
   const spits: Spit[] = [];
   const vendimiaCarts: VendimiaCart[] = [];
   const vendimiaThrows: VendimiaThrow[] = [];
-  const gauchoSnacks: GauchoSnack[] = [];   // empanadas y mates de los bailarines
+  const gauchoSnacks: GauchoSnack[] = [];   // empanadas y mates de los caminantes
   let canitoHP   = 20;
   let killCount  = 0;
   let barkCD     = 0;
@@ -698,7 +839,6 @@ async function main(): Promise<void> {
   // (ver "Puntos de control" en el loop).
   const checkpoint = { x: START_X, z: START_Z };
   let checkpointLine = START_X;   // x de la última transversal cruzada
-  const CROSS_STEP = 100;         // las transversales están cada 100 m
 
   const renderLives = () => { hudLives.textContent = '🐾'.repeat(lives) || '—'; };
   renderLives();
@@ -815,7 +955,7 @@ async function main(): Promise<void> {
     canito.group.position.set(checkpoint.x, 0, checkpoint.z);
     canito.setYRot(Math.atan2(PORTONES_X - checkpoint.x, PORTONES_Z - checkpoint.z));
     for (const z of zombies) {
-      if (!z.alive || z.isThrower || z.isQueen || z.isCaballito || z.isBoss) continue;
+      if (!z.alive || z.isThrower || z.isQueen || z.isCaballito || z.isBoss || z.block !== null) continue;
       z.calm();
       if (Math.hypot(z.position.x - checkpoint.x, z.position.z - checkpoint.z) < RESPAWN_CLEAR_R) {
         z.takeDamage(z.hp);
@@ -858,7 +998,14 @@ async function main(): Promise<void> {
         const quedan = `Te ${lives === 1 ? 'queda 1 vida' : `quedan ${lives} vidas`}`;
         showCard([{ title: '¡AY, CANITO!', color: '#ff5a4a', subtitle: quedan }], {
           onBlack: () => {
+            // Los sobrevivientes vuelven a su escondite y, al entrar de nuevo a la
+            // cuadra que sigue al checkpoint, se despiertan otra vez.
+            for (const z of zombies) if (z.alive) z.goHome();
+            clearSideBlocks();
+            wokenBlock = Math.ceil(checkpointLine / BLOCK_SIZE) + 1;
+            wakeLead = 0;
             respawn();
+            loseWeapons();
             deathVeil.style.transition = 'none';
             deathVeil.style.opacity = '0';
             requestAnimationFrame(() => { deathVeil.style.transition = `opacity ${DEATH_FALL}s ease-in`; });
@@ -916,6 +1063,15 @@ async function main(): Promise<void> {
   }
 
   // ── Tecla M: música on/off ─────────────────────────────────────────────────
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat || gameOver || victory || dying || transitioning) return;
+    if (e.code === 'KeyQ') { cycleWeapon(); return; }
+    const slot = ['Digit1', 'Digit2', 'Digit3'].indexOf(e.code);
+    if (slot < 0) return;
+    const k = WEAPON_SLOTS[slot];
+    if (!k || ammo[k] > 0) selectWeapon(k);
+  });
+
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'KeyM') return;
     const on = music.toggle();
@@ -1112,6 +1268,7 @@ async function main(): Promise<void> {
     checkpoint.x = sx; checkpoint.z = sz;
     checkpointLine = CHILE_X;
     respawn();
+    wakeBlock(CHILE_X / BLOCK_SIZE);
     for (const z of zombies) {
       if (z.alive && !z.isCaballito && z.position.x > CHILE_X - 30) {
         z.takeDamage(z.hp);
@@ -1219,19 +1376,18 @@ async function main(): Promise<void> {
   };
 
   const canitoPos = canito.getPosition();   // captured by closure; same Vector3 ref
+  const KIDS_HEAR_R = 60;                    // a esta distancia se oye a los niños acercarse
+  const TRAM_HORN_R = 58;                    // el tranvía avisa a esta distancia (23 m/s · 2,5 s)
+  const TRAM_HORN_LATERAL = 12;              // Canito "sobre las vías": a menos de esto del tranvía
   let carInfectCD = 0.5;                     // cuenta regresiva para infectar autos
-  const _zTarget = new THREE.Vector3();      // target reusable (humano más cercano)
   const zHazards: { x: number; z: number }[] = [];   // posiciones de zombies (pánico del tránsito)
 
-  // Distracción de los zombies: sólo se desvían por un auto si lo tienen MUY
-  // cerca; si se aleja, vuelven a ir por Canito.
-  const VEH_HUNT_R = 12;                             // radio para embestir autos/motos
-
-  // Atropello de los vehículos en pánico: mata zombies y lastima a Canito.
+  // Atropello de los vehículos en pánico: mata zombies y lastima a Canito. Los
+  // que esperan en su cuadra se salvan, para que no quede vacía antes de llegar.
   const trafficRunOver = (x: number, z: number): boolean => {
     let hit = false;
     for (const z2 of zombies) {
-      if (z2.alive && Math.hypot(z2.position.x - x, z2.position.z - z) < 2.0) { killZombie(z2, false); hit = true; }
+      if (z2.alive && z2.block === null && Math.hypot(z2.position.x - x, z2.position.z - z) < 2.0) { killZombie(z2, false); hit = true; }
     }
     if (!gameOver && Math.hypot(canitoPos.x - x, canitoPos.z - z) < 1.7) { setHP(canitoHP - 3, x, z); hit = true; }
     return hit;
@@ -1271,7 +1427,21 @@ async function main(): Promise<void> {
     // se haya desviado por una calle lateral. Sólo avanza, nunca retrocede. En
     // el Nivel 1 el último es Av. Mitre (la plaza): Chile es la pelea del Carro.
     if (!dying && !transitioning && !gameOver) {
-      const lineX = Math.ceil(canitoPos.x / CROSS_STEP) * CROSS_STEP;
+      const block = Math.floor((canitoPos.x - wakeLead) / BLOCK_SIZE) + 1;
+      if (block < wokenBlock && (level1Cleared || block > CHILE_X / BLOCK_SIZE)) wakeBlock(block);
+      // Calles laterales: se llena su cuadra y la que sigue, en la dirección en
+      // que va Canito, para que el grupo le salga al paso.
+      const row = Math.round(canitoPos.z / BLOCK_SIZE);
+      if (row !== 0) {
+        const here = Math.floor(canitoPos.x / BLOCK_SIZE) + 1;
+        for (const b of [here, here - 1]) {
+          const sideKey = `${b},${row}`;
+          if (sideVisited.has(sideKey) || (!level1Cleared && b <= CHILE_X / BLOCK_SIZE)) continue;
+          sideVisited.add(sideKey);
+          fillSideBlock(b, row);
+        }
+      }
+      const lineX = Math.ceil(canitoPos.x / BLOCK_SIZE) * BLOCK_SIZE;
       if (lineX < checkpointLine && (level1Cleared || lineX > CHILE_X)) {
         checkpointLine = lineX;
         let sx = lineX;
@@ -1332,7 +1502,7 @@ async function main(): Promise<void> {
         carInfectCD = 0.35;
         for (let k = 0; k < 2 && zombies.length; k++) {
           const z = zombies[(Math.random() * zombies.length) | 0];
-          if (!z.alive) continue;
+          if (!z.alive || z.block !== null) continue;
           const got = traffic.infectNear(z.position.x, z.position.z, 3.2);
           if (got) {
             const car = new GauchoCar();
@@ -1365,6 +1535,11 @@ async function main(): Promise<void> {
     // ── Metrotranvía: arrolla y mata lo que pille (enemigos y Canito) ────────
     for (const tr of trams) {
       tr.update(dt);
+      // Toca bocina cuando Canito está sobre las vías, ~2,5 s antes de llegarle
+      const ahead = tr.distanceAhead(canitoPos.x, canitoPos.z, TRAM_HORN_LATERAL);
+      if (ahead !== null && ahead < TRAM_HORN_R && !gameOver && !victory && !dying) {
+        sound.tramHorn(1 - ahead / TRAM_HORN_R);
+      }
       // Atropella a Canito → letal (pierde una vida)
       if (!gameOver && !victory && tr.hits(canitoPos.x, canitoPos.z, 0.4)) {
         sound.boom();
@@ -1427,10 +1602,10 @@ async function main(): Promise<void> {
       }
       canito.bark();
       sound.bark();
-      ammo--;
-      if (ammo <= 0) {
-        weapon = null;
-        flashBanner('Sin munición — vuelve el fuego 🔥', '#ff8a40');
+      ammo[weapon]--;
+      if (ammo[weapon] <= 0) {
+        weapon = (['metralla', 'escopeta'] as const).find(k => ammo[k] > 0) ?? null;
+        flashBanner(weapon ? `Sin munición — cambiás a ${WEAPONS[weapon].label}` : 'Sin munición — vuelve el fuego 🔥', '#ff8a40');
       }
       renderWeapon();
     } else if (!weapon && fireJustPressed && barkCD <= 0) {
@@ -1449,31 +1624,21 @@ async function main(): Promise<void> {
 
     // ── Zombies ────────────────────────────────────────────────────────────
     const ZCULL2 = 185 * 185;   // los zombies lejos del jugador se congelan/ocultan
+    let nearestKid = KIDS_HEAR_R;
     for (const z of zombies) {
       if (!z.alive) continue;
       // Culling por distancia: lejos → invisible y sin IA/colisión (rinde con
       // muchos zombies).
       const zdx = z.position.x - canitoPos.x, zdz = z.position.z - canitoPos.z;
-      if (zdx * zdx + zdz * zdz > ZCULL2) {
+      if (z.buried || zdx * zdx + zdz * zdz > ZCULL2) {
         if (z.group.visible) z.group.visible = false;
         continue;
       }
       if (!z.group.visible) z.group.visible = true;
-      // Target: Canito por defecto. Los zombies normales sólo se desvían por un
-      // auto si lo tienen a mano (dentro de su radio de caza); si la
-      // presa huye lejos, la sueltan y vuelven por Canito. Los jefes/throwers/
-      // reinas siempre van por Canito.
-      let tgt: THREE.Vector3 = canitoPos;
-      let tgtIsCanito = true;
-      if (!z.isThrower && !z.isQueen && !z.isCaballito && !z.isBoss) {
-        let bd = Math.hypot(canitoPos.x - z.position.x, canitoPos.z - z.position.z);
-        let bx = canitoPos.x, bz = canitoPos.z, isCan = true;
-        const nv = traffic.nearest(z.position.x, z.position.z);   // también embisten autos/motos
-        if (nv && nv.d < bd && nv.d < VEH_HUNT_R) { bd = nv.d; bx = nv.x; bz = nv.z; isCan = false; }
-        if (!isCan) { _zTarget.set(bx, 0, bz); tgt = _zTarget; tgtIsCanito = false; }
-      }
-      const r = z.update(dt, tgt, worldGrid);
-      if (r.hitTarget && tgtIsCanito && !gameOver) {
+      if (z.isChild && z.chasing) nearestKid = Math.min(nearestKid, Math.hypot(zdx, zdz));
+      // Todos van siempre por Canito: los autos no los distraen.
+      const r = z.update(dt, canitoPos, worldGrid);
+      if (r.hitTarget && !gameOver) {
         setHP(canitoHP - (z.isCaballito ? 3 : 1), z.position.x, z.position.z);
         sound.bite();
       }
@@ -1500,7 +1665,7 @@ async function main(): Promise<void> {
         }
       }
 
-      // Walkers "bailarines": mientras bailan lanzan empanadas y mates
+      // Los caminantes lanzan empanadas y mates mientras avanzan
       if (!gameOver) {
         const sn = z.tryThrowSnack(canitoPos, dt);
         if (sn) {
@@ -1525,6 +1690,7 @@ async function main(): Promise<void> {
       const d = Math.hypot(z.position.x - canitoPos.x, z.position.z - canitoPos.z);
       if (d < 35 && Math.random() < 0.012) sound.groan();
     }
+    if (nearestKid < KIDS_HEAR_R && !dying && !gameOver && !victory) sound.kids(1 - nearestKid / KIDS_HEAR_R);
 
     // ── Thrown cars ────────────────────────────────────────────────────────
     for (let i = thrownCars.length - 1; i >= 0; i--) {
@@ -1624,7 +1790,7 @@ async function main(): Promise<void> {
       }
     }
 
-    // ── Empanadas y mates (gauchos bailarines) ───────────────────────────────
+    // ── Empanadas y mates (gauchos caminantes) ───────────────────────────────
     for (let i = gauchoSnacks.length - 1; i >= 0; i--) {
       const s = gauchoSnacks[i];
       s.update(dt, colliders);
@@ -1734,7 +1900,7 @@ async function main(): Promise<void> {
         for (const z of zombies) {
           if (hit) break;
           if (!z.alive) continue;
-          if (Math.hypot(z.position.x - fb.position.x, z.position.z - fb.position.z) < ZombieGaucho.HIT_RADIUS) {
+          if (!z.buried && Math.hypot(z.position.x - fb.position.x, z.position.z - fb.position.z) < ZombieGaucho.HIT_RADIUS) {
             fb.kill();
             hit = true;
             if (z.isQueen || z.isBoss || z.isCaballito) {
@@ -1859,8 +2025,8 @@ async function main(): Promise<void> {
       wp.update(dt);
       if (!gameOver && Math.hypot(wp.position.x - canitoPos.x, wp.position.z - canitoPos.z) < WeaponPickup.PICKUP_R) {
         wp.pickup();
-        // Misma arma → suma munición; otra → la reemplaza.
-        ammo = weapon === wp.kind ? ammo + WEAPONS[wp.kind].ammo : WEAPONS[wp.kind].ammo;
+        // Suma munición a esa arma y la equipa; las otras quedan guardadas.
+        ammo[wp.kind] += WEAPONS[wp.kind].ammo;
         weapon = wp.kind;
         powerCharge = 0;
         renderWeapon();

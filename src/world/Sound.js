@@ -9,6 +9,8 @@ export class SoundManager {
     _last = new Map();
     _master = null;
     _barkBuf = null; // ladrido real (audio/bark.mp3)
+    _kidsBuf = null; // griterío de niños (audio/kids.mp3)
+    _hornBuf = null; // bocina del tranvía (audio/tram-horn.mp3)
     getCtx() {
         if (this._ctx)
             return this._ctx;
@@ -19,6 +21,8 @@ export class SoundManager {
         this._master.gain.value = 0.45;
         this._master.connect(this._ctx.destination);
         void this._loadBark();
+        void this._loadKids();
+        void this._loadHorn();
         return this._ctx;
     }
     async _loadBark() {
@@ -29,6 +33,24 @@ export class SoundManager {
             this._barkBuf = await this._ctx.decodeAudioData(await res.arrayBuffer());
         }
         catch { /* se queda con el ladrido sintético */ }
+    }
+    async _loadKids() {
+        try {
+            const res = await fetch('audio/kids.mp3');
+            if (!res.ok)
+                return;
+            this._kidsBuf = await this._ctx.decodeAudioData(await res.arrayBuffer());
+        }
+        catch { /* los niños corren en silencio */ }
+    }
+    async _loadHorn() {
+        try {
+            const res = await fetch('audio/tram-horn.mp3');
+            if (!res.ok)
+                return;
+            this._hornBuf = await this._ctx.decodeAudioData(await res.arrayBuffer());
+        }
+        catch { /* el tranvía llega sin avisar */ }
     }
     // Audio needs a user gesture to start in most browsers. Call this from a
     // mousedown/keydown listener at boot.
@@ -45,6 +67,34 @@ export class SoundManager {
             return true;
         this._last.set(key, now);
         return false;
+    }
+    /** Griterío de los niños zombi; `near` va de 0 (lejos) a 1 (encima). */
+    kids(near) {
+        if (!this._kidsBuf || this.throttle('kids', 6))
+            return;
+        const ctx = this.getCtx();
+        const src = ctx.createBufferSource();
+        src.buffer = this._kidsBuf;
+        src.playbackRate.value = 0.96 + Math.random() * 0.08;
+        const g = ctx.createGain();
+        g.gain.value = 0.35 + near * 0.75;
+        src.connect(g);
+        g.connect(this.master());
+        src.start();
+    }
+    /** Bocina del Metrotranvía seguida de las ruedas sobre los rieles (11 s, de
+     *  ahí la espera entre uno y otro); `near` va de 0 (lejos) a 1 (encima). */
+    tramHorn(near) {
+        if (!this._hornBuf || this.throttle('tramHorn', 11))
+            return;
+        const ctx = this.getCtx();
+        const src = ctx.createBufferSource();
+        src.buffer = this._hornBuf;
+        const g = ctx.createGain();
+        g.gain.value = 0.7 + near * 0.6;
+        src.connect(g);
+        g.connect(this.master());
+        src.start();
     }
     bark() {
         if (this.throttle('bark', 0.1))

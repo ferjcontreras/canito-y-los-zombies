@@ -40,6 +40,10 @@ const MAT_QUEEN_HAIR = new THREE.MeshLambertMaterial({ color: 0x2a1a12, flatShad
 const MAT_EYE_QUEEN = new THREE.MeshLambertMaterial({
     color: 0xff50d0, emissive: 0xff20b0, emissiveIntensity: 1.8,
 });
+// Niños zombi: guardapolvo blanco de escuela, sin poncho ni sombrero.
+const MAT_TUNIC_KID = new THREE.MeshLambertMaterial({ color: 0xd8d8cc, flatShading: true });
+// Perros zombi: pelaje sucio con la piel podrida asomando.
+const MAT_DOG_FUR = new THREE.MeshLambertMaterial({ color: 0x5a4a38, flatShading: true });
 // Caballitos de Marly: white Carrara-marble rearing-horse + tamer statue bosses.
 const MAT_MARBLE = new THREE.MeshLambertMaterial({ color: 0xe9e7e0, flatShading: true });
 const MAT_MARBLE2 = new THREE.MeshLambertMaterial({ color: 0xdad7cd, flatShading: true }); // shaded marble
@@ -52,13 +56,46 @@ export class ZombieGaucho {
     isBoss;
     isQueen;
     isCaballito;
-    _dancingNow = false; // ¿está en su baile ahora mismo? (walkers)
+    isChild;
+    isDog;
     _aggro = false; // ¿ya está persiguiendo?
+    /** Cuadra que custodia: se queda quieto (ni el ruido lo despierta) hasta que
+     *  Canito llega a ella. null = ya despierto o no pertenece a ninguna. */
+    block = null;
+    _home = null;
+    _underground = false; // espera bajo tierra (donde no hay dónde esconderse)
+    _rise = 0; // segundos que le faltan para salir del suelo
+    /** Lo asigna a una cuadra: ahí espera, y ahí vuelve si Canito pierde una vida. */
+    guardBlock(block, underground = false) {
+        this.block = block;
+        this._underground = underground;
+        this._home = { x: this.group.position.x, z: this.group.position.z, block };
+    }
+    /** Ya salió a buscar a Canito (no está esperando ni saliendo del suelo). */
+    get chasing() { return this._aggro && this._rise <= 0; }
+    /** Enterrado todavía: no se ve ni se le puede pegar. */
+    get buried() { return this._underground && this.block !== null; }
+    /** Vuelve a su escondite a esperar otra vez. */
+    goHome() {
+        if (!this._home)
+            return;
+        this.group.position.set(this._home.x, 0, this._home.z);
+        this.block = this._home.block;
+        this._aggro = false;
+        this._rise = 0;
+    }
+    /** Canito llegó a su cuadra: sale a buscarlo. */
+    wake() {
+        if (this.buried)
+            this._rise = ZombieGaucho.RISE_TIME;
+        this.block = null;
+        this._aggro = true;
+    }
     /** Despierta al zombie (emboscadas, o cuando Canito mata a uno cerca). */
-    alert() { this._aggro = true; }
+    alert() { if (this.block === null)
+        this._aggro = true; }
     /** Deja de perseguir (al reaparecer Canito tras perder una vida). */
     calm() { this._aggro = false; }
-    get isDancing() { return this._dancingNow; }
     _hp;
     _fastGait = false; // runner-style leg/bob animation
     _phase = Math.random() * Math.PI * 2;
@@ -66,9 +103,10 @@ export class ZombieGaucho {
     _biteTimer = 0;
     _throwCooldown = 2 + Math.random() * 3; // initial stagger
     static BITE_DURATION = 0.32;
-    static DANCE_DURATION = 2.8;
     static STUMBLE_DURATION = 0.9;
     _legL;
+    _hindL; // patas traseras (sólo perros)
+    _hindR;
     _legR;
     _torso;
     _head;
@@ -77,20 +115,21 @@ export class ZombieGaucho {
     _speed;
     _style = Math.random() * Math.PI * 2;
     _limp = 0.85 + Math.random() * 0.35;
-    // Walkers break into a dance every so often; runners trip every so often.
-    _danceTimer = 0;
-    _danceCooldown = 1 + Math.random() * 2;
+    // Runners trip every so often.
     _stumbleTimer = 0;
     _stumbleCooldown = 1.5 + Math.random() * 2.5;
-    static WALK_SPEED = 3.2;
+    static WALK_SPEED = 5;
+    static CHILD_SPEED = 5; // corren, pero un Canito al paso se les escapa
+    static DOG_SPEED = 11;
+    static RISE_TIME = 1.2;
     static RUN_SPEED = 18; // same as Canito sprint — they match pace, can't be outrun
     static THROWER_SPEED = 2.2; // throwers are heavy and slow
     static DETECT_R = 150; // jefes, throwers y reinas
     // Comunes y corredores: te "ven" recién de cerca y, una vez que te vieron, te
-    // siguen hasta que te alejás bastante. Así la horda se va despertando a medida
-    // que Canito avanza, en vez de venir toda junta desde la largada.
+    // siguen hasta que te alejás bastante. LOSE_R cubre una cuadra entera, para
+    // que al despertarla vengan también los de la otra punta.
     static NOTICE_R = 38;
-    static LOSE_R = 80;
+    static LOSE_R = 150;
     static ATTACK_R = 1.7;
     static DAMAGE_INTERVAL = 1.4;
     static HIT_RADIUS = 1.4;
@@ -114,11 +153,13 @@ export class ZombieGaucho {
     static GRAPE_INTERVAL = 1.8;
     static GRAPE_STANDOFF = 9; // stop advancing once this close
     static BOSS_THROW_INTERVAL = 1.5;
-    // Walker-specific: los "bailarines" lanzan empanadas y mates mientras bailan
+    // Walker-specific: lanzan empanadas y mates mientras avanzan
     static SNACK_RANGE_MIN = 5;
     static SNACK_RANGE_MAX = 38;
-    static SNACK_INTERVAL = 1.0;
+    static SNACK_INTERVAL = 3;
     constructor(opts = {}) {
+        this.isChild = !!opts.child;
+        this.isDog = !!opts.dog;
         this.isBoss = !!opts.boss;
         this.isCaballito = !this.isBoss && !!opts.caballito;
         this.isQueen = !this.isBoss && !this.isCaballito && !!opts.queen;
@@ -137,8 +178,12 @@ export class ZombieGaucho {
                     ? ZombieGaucho.THROWER_SPEED
                     : (this.isRunner || this.isQueen)
                         ? ZombieGaucho.RUN_SPEED
-                        : ZombieGaucho.WALK_SPEED;
-        this._fastGait = this.isRunner || this.isQueen;
+                        : this.isDog
+                            ? ZombieGaucho.DOG_SPEED
+                            : this.isChild
+                                ? ZombieGaucho.CHILD_SPEED
+                                : ZombieGaucho.WALK_SPEED;
+        this._fastGait = this.isRunner || this.isQueen || this.isChild || this.isDog;
         this.group = new THREE.Group();
         if (this.isBoss)
             this.group.scale.setScalar(2.6);
@@ -146,6 +191,8 @@ export class ZombieGaucho {
             this.group.scale.setScalar(1.8);
         else if (this.isThrower)
             this.group.scale.setScalar(1.45);
+        else if (this.isChild)
+            this.group.scale.setScalar(0.62);
         // Caballitos and queens have wholly different silhouettes — build them
         // separately and skip the gaucho clothing below.
         if (this.isCaballito) {
@@ -164,9 +211,18 @@ export class ZombieGaucho {
             });
             return;
         }
+        if (this.isDog) {
+            this._buildDog();
+            this.group.traverse(m => {
+                if (m.isMesh)
+                    m.castShadow = true;
+            });
+            return;
+        }
         const tunicMat = this.isBoss ? MAT_TUNIC_BOSS
             : this.isThrower ? MAT_TUNIC_THROW
-                : MAT_TUNIC;
+                : this.isChild ? MAT_TUNIC_KID
+                    : MAT_TUNIC;
         const body = new THREE.Group();
         body.position.y = 1.08;
         if (this.isRunner)
@@ -184,7 +240,8 @@ export class ZombieGaucho {
         poncho.position.y = 0.39;
         if (this.isRunner)
             poncho.rotation.x = 0.18;
-        body.add(poncho);
+        if (!this.isChild)
+            body.add(poncho);
         const headPivot = new THREE.Group();
         headPivot.position.set(this.isRunner ? 0.05 : 0, this.isRunner ? 0.67 : 0.70, this.isRunner ? 0.05 : 0);
         body.add(headPivot);
@@ -208,10 +265,12 @@ export class ZombieGaucho {
         // Chambergo (gaucho hat): wide brim + low crown
         const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.04, 12), MAT_HAT);
         brim.position.y = 0.18;
-        headPivot.add(brim);
+        if (!this.isChild)
+            headPivot.add(brim);
         const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.20, 0.20, 0.17, 8), MAT_HAT);
         crown.position.y = 0.27;
-        headPivot.add(crown);
+        if (!this.isChild)
+            headPivot.add(crown);
         // Arms with shoulder pivots instead of rotating one rigid box.
         const makeArm = (sx) => {
             const pivot = new THREE.Group();
@@ -252,6 +311,45 @@ export class ZombieGaucho {
             if (m.isMesh)
                 m.castShadow = true;
         });
+    }
+    /** Perro zombi: cuadrúpedo bajo. Sets _torso / _head / _legL / _legR (patas
+     *  delanteras); las traseras las copia update() cruzadas, para el trote. */
+    _buildDog() {
+        const body = new THREE.Group();
+        body.position.y = 0.52;
+        this.group.add(body);
+        this._torso = body;
+        const m = (geo, mat, x, y, z, parent) => {
+            const me = new THREE.Mesh(geo, mat);
+            me.position.set(x, y, z);
+            parent.add(me);
+            return me;
+        };
+        m(new THREE.BoxGeometry(0.32, 0.30, 0.85), MAT_DOG_FUR, 0, 0, 0, body);
+        m(new THREE.BoxGeometry(0.33, 0.14, 0.34), MAT_SKIN, 0, 0.09, -0.12, body); // lomo podrido
+        const tail = m(new THREE.CylinderGeometry(0.02, 0.05, 0.38, 5), MAT_DOG_FUR, 0, 0.12, -0.54, body);
+        tail.rotation.x = -0.8;
+        const head = new THREE.Group();
+        head.position.set(0, 0.2, 0.5);
+        body.add(head);
+        this._head = head;
+        m(new THREE.BoxGeometry(0.27, 0.26, 0.3), MAT_DOG_FUR, 0, 0, 0.06, head);
+        m(new THREE.BoxGeometry(0.16, 0.14, 0.22), MAT_SKIN, 0, -0.05, 0.3, head); // hocico
+        for (const sx of [-1, 1]) {
+            m(new THREE.ConeGeometry(0.06, 0.16, 4), MAT_DOG_FUR, sx * 0.09, 0.2, 0, head);
+            m(new THREE.SphereGeometry(0.03, 4, 4), MAT_EYE, sx * 0.08, 0.05, 0.22, head);
+        }
+        const makeLeg = (sx, z) => {
+            const pivot = new THREE.Group();
+            pivot.position.set(sx * 0.12, 0.42, z);
+            this.group.add(pivot);
+            m(new THREE.CylinderGeometry(0.05, 0.04, 0.42, 6), MAT_DOG_FUR, 0, -0.21, 0, pivot);
+            return pivot;
+        };
+        this._legL = makeLeg(-1, 0.32);
+        this._legR = makeLeg(1, 0.32);
+        this._hindL = makeLeg(-1, -0.32);
+        this._hindR = makeLeg(1, -0.32);
     }
     /** Caballito de Marly: white-marble rearing horse + tamer on a plinth.
      *  Sets _torso (head pivot) / _legL / _legR (raised front legs) for animation. */
@@ -476,13 +574,11 @@ export class ZombieGaucho {
         const vel = new THREE.Vector3(ux * vh, vy, uz * vh);
         return { origin, vel };
     }
-    /** Gauchos "bailarines" (walkers): mientras bailan lanzan empanadas y mates.
+    /** Gauchos caminantes (walkers): lanzan empanadas y mates mientras avanzan.
      *  Devuelve origen + velocidad + tipo del proyectil, o null. */
     tryThrowSnack(target, dt) {
-        // Sólo los caminantes comunes, y sólo mientras están en su baile.
-        if (this.isRunner || this.isThrower || this.isQueen || this.isCaballito || this.isBoss)
-            return null;
-        if (!this._dancingNow)
+        // Sólo los caminantes comunes: tiran mientras avanzan.
+        if (this.isRunner || this.isThrower || this.isQueen || this.isCaballito || this.isBoss || this.isChild || this.isDog)
             return null;
         this._throwCooldown -= dt;
         if (this._throwCooldown > 0)
@@ -532,22 +628,6 @@ export class ZombieGaucho {
         const vel = new THREE.Vector3(ux * vh, vy, uz * vh);
         return { origin, vel };
     }
-    /** Cumbia/chacarera shimmy — big hip sway, hops, spin wiggle, arms up. */
-    _animateDance(dt) {
-        this._phase += dt * 9;
-        const ph = this._phase;
-        this.group.position.y = Math.abs(Math.sin(ph * 2)) * 0.22; // bouncy hops
-        this.group.rotation.y += Math.sin(ph) * 0.35; // twist on the spot
-        this._torso.rotation.z = Math.sin(ph) * 0.5; // big hip sway
-        this._torso.rotation.x = Math.sin(ph * 2) * 0.12;
-        if (this._head) {
-            this._head.rotation.x = Math.sin(ph * 1.7) * 0.16;
-            this._head.rotation.z = Math.sin(ph + this._style) * 0.22;
-        }
-        this._legL.rotation.x = Math.sin(ph) * 0.5;
-        this._legR.rotation.x = -Math.sin(ph) * 0.5;
-        this._poseArms(-1.85 + Math.sin(ph) * 0.75, -1.85 - Math.sin(ph) * 0.75, 0.55 + Math.sin(ph) * 0.35, -0.55 - Math.sin(ph) * 0.35, 0.8);
-    }
     /** Trip-and-recover lurch — pitches way forward, nearly hits the ground. */
     _animateStumble() {
         const t = Math.max(0, this._stumbleTimer / ZombieGaucho.STUMBLE_DURATION); // 1 → 0
@@ -562,10 +642,15 @@ export class ZombieGaucho {
         this._blendRotation(this._head, -0.35 * arc, Math.sin((1 - t) * Math.PI * 5) * 0.25, 0.55);
     }
     update(dt, target, grid) {
-        if (!this.alive)
+        if (!this.alive || this.buried)
             return { hitTarget: false };
+        // Saliendo del suelo: todavía no camina ni muerde.
+        if (this._rise > 0) {
+            this._rise = Math.max(0, this._rise - dt);
+            this.group.position.y = -2 * this._rise / ZombieGaucho.RISE_TIME;
+            return { hitTarget: false };
+        }
         this._attackCooldown -= dt;
-        this._dancingNow = false; // se pone en true abajo si el walker está bailando
         // Bite lurch — torso/head swing forward as if chomping, then snap back.
         let bitePulse = 0;
         if (this._biteTimer > 0) {
@@ -584,7 +669,7 @@ export class ZombieGaucho {
             if (dist > ZombieGaucho.LOSE_R)
                 this._aggro = false;
         }
-        else if (dist < ZombieGaucho.NOTICE_R) {
+        else if (this.block === null && dist < ZombieGaucho.NOTICE_R) {
             this._aggro = true;
         }
         if (!this.isQueen && dist < ZombieGaucho.ATTACK_R) {
@@ -611,27 +696,10 @@ export class ZombieGaucho {
             // Queens hold a standoff distance and lob grapes; everyone else closes in.
             const holdGround = this.isQueen && dist < ZombieGaucho.GRAPE_STANDOFF;
             if (!holdGround) {
-                const isWalker = !this._fastGait && !this.isThrower && !this.isBoss && !this.isCaballito;
-                // ── Quirk state machines: walkers dance, runners trip ────────────────
+                // Quirk: los corredores tropiezan.
                 let speedMul = 1;
-                let dancing = false, stumbling = false;
-                if (isWalker) {
-                    if (this._danceTimer > 0) {
-                        this._danceTimer -= dt;
-                        dancing = true;
-                    }
-                    else if ((this._danceCooldown -= dt) <= 0) {
-                        this._danceTimer = ZombieGaucho.DANCE_DURATION;
-                        this._danceCooldown = 4 + Math.random() * 5;
-                        dancing = true;
-                        this._throwCooldown = 0.3; // prepara la primera empanada/mate
-                    }
-                    if (dancing) {
-                        speedMul = 0.25;
-                        this._dancingNow = true;
-                    } // shuffle + tira comida
-                }
-                else if (this.isRunner) {
+                let stumbling = false;
+                if (this.isRunner) {
                     if (this._stumbleTimer > 0) {
                         this._stumbleTimer -= dt;
                         stumbling = true;
@@ -669,14 +737,11 @@ export class ZombieGaucho {
                 }
                 // else: stuck against a wall — animation still plays in place
                 // Animation
-                if (dancing) {
-                    this._animateDance(dt);
-                }
-                else if (stumbling) {
+                if (stumbling) {
                     this._animateStumble();
                 }
                 else {
-                    const animSpeed = (this._fastGait ? 13.5 : this.isThrower ? 4.4 : this.isCaballito ? 7 : 5.6) * this._limp;
+                    const animSpeed = (this._fastGait ? 13.5 : this.isThrower ? 4.4 : this.isCaballito ? 7 : 8.5) * this._limp;
                     const swing = this._fastGait ? 1.15 : this.isCaballito ? 0.72 : this.isThrower ? 0.36 : 0.62;
                     const bobAmt = this._fastGait ? 0.15 : this.isCaballito ? 0.09 : this.isThrower ? 0.035 : 0.065;
                     this._phase += dt * animSpeed;
@@ -686,7 +751,7 @@ export class ZombieGaucho {
                     this._legR.rotation.x += (sw2 * swing * (0.82 + this._limp * 0.16) - this._legR.rotation.x) * 0.55;
                     this._legL.rotation.z = Math.sin(this._phase * 0.5 + this._style) * 0.08;
                     this._legR.rotation.z = -Math.sin(this._phase * 0.47 + this._style) * 0.07;
-                    const lean = this._fastGait ? 0.34 : this.isThrower ? -0.03 : this.isCaballito ? 0.10 : 0.16;
+                    const lean = this.isDog ? 0 : this._fastGait ? 0.34 : this.isThrower ? -0.03 : this.isCaballito ? 0.10 : 0.16;
                     const torsoX = lean + bitePulse * 0.45 + Math.max(0, sw) * 0.05;
                     const torsoZ = Math.sin(this._phase * 0.5 + this._style) * (this._fastGait ? 0.12 : 0.08);
                     this._blendRotation(this._torso, torsoX, torsoZ, 0.30);
@@ -713,6 +778,10 @@ export class ZombieGaucho {
             this._blendRotation(this._head, Math.sin(this._phase * 0.6) * 0.04, Math.sin(this._phase * 0.8 + this._style) * 0.08, 0.10);
             this._poseArms(-0.95, -0.95, 0.20, -0.20, 0.12);
             this.group.position.y = Math.abs(Math.sin(this._phase)) * 0.025;
+        }
+        if (this._hindL && this._hindR) {
+            this._hindL.rotation.x = this._legR.rotation.x;
+            this._hindR.rotation.x = this._legL.rotation.x;
         }
         return { hitTarget };
     }

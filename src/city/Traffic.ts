@@ -230,16 +230,6 @@ export class TrafficManager {
     }
   }
 
-  /** El vehículo más cercano a un punto (para que los zombies lo cacen). */
-  nearest(x: number, z: number): { x: number; z: number; d: number } | null {
-    let best = Infinity, bx = 0, bz = 0, found = false;
-    for (const v of this.vehicles) {
-      const d = Math.hypot(v.agent.x - x, v.agent.z - z);
-      if (d < best) { best = d; bx = v.agent.x; bz = v.agent.z; found = true; }
-    }
-    return found ? { x: bx, z: bz, d: best } : null;
-  }
-
   /** Destruye un vehículo cerca del punto (Canito puede matarlos). Devuelve
    *  dónde estaba (para soltar premios), o null si no había ninguno. */
   killNear(x: number, z: number, r: number): { x: number; z: number } | null {
